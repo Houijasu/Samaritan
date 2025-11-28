@@ -1,4 +1,4 @@
-﻿namespace Samaritan.Tests.Engine;
+namespace Samaritan.Tests.Engine;
 
 using MathNet.Spatial.Euclidean;
 
@@ -258,5 +258,52 @@ public class PredictionEngineTests
         var result = engine.ValidateHit(skillshot, casterPos, aimPos, targetPos, hitboxRadius: 50, timeElapsed: 0.5);
 
         Assert.True(result);
+    }
+
+    [Fact]
+    public void SolveTrailingEdge_ZeroDelay_MovingAway_DoesNotThrow()
+    {
+        // Force effective delay to be 0 by setting Infinite tick rate (1/inf = 0)
+        var config = new PredictionConfig { ServerTickRateHz = double.PositiveInfinity };
+        var engine = new PredictionEngine(config);
+        
+        // Delay 0
+        var skillshot = new Skillshot.Linear(Delay: 0, Speed: 1000, Width: 100, Range: 2000);
+        var casterPos = new Point2D(0, 0);
+        
+        // Target at (500,0), moving right at speed 100 (away from caster)
+        var targetState = new MovementState.Walking(
+            new Point2D(500, 0),
+            new Vector2D(100, 0),
+            null);
+
+        // This calls PredictFromState -> SolveTrailingEdgeInterception
+        var result = engine.PredictFromState(skillshot, casterPos, targetState, hitboxRadius: 50);
+
+        Assert.IsType<PredictionResult.Hit>(result);
+    }
+
+    [Fact]
+    public void SolveTrailingEdge_CasterOnTarget_ReturnsHit()
+    {
+        var engine = new PredictionEngine();
+        // Width 200 => effective radius 100 (if hitbox=0)
+        // Delay 1.0, Target Speed 100 => Delay*Speed = 100
+        // Cut distance = 100 - 100 = 0.
+        // TrailingEdgeStart = TargetPos + 0 = TargetPos.
+        // CasterPos = TargetPos => distanceToTrailingEdge = 0.
+        var skillshot = new Skillshot.Linear(Delay: 1.0f, Speed: 1000, Width: 200, Range: 2000);
+        var casterPos = new Point2D(500, 500);
+        
+        // Target exactly at caster pos
+        var targetState = new MovementState.Walking(
+            new Point2D(500, 500),
+            new Vector2D(100, 0),
+            null);
+
+        // hitboxRadius 0 to make math clean
+        var result = engine.PredictFromState(skillshot, casterPos, targetState, hitboxRadius: 0);
+
+        Assert.IsType<PredictionResult.Hit>(result);
     }
 }

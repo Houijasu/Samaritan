@@ -396,8 +396,10 @@ public sealed class PredictionEngine : IPredictionEngine
         var projectileSpeedSqr = projectileSpeed * projectileSpeed;
 
         // Angle between caster-to-target and target velocity
-        var cosAngle = toTrailingEdge.DotProduct(targetVelocity) / (distanceToTrailingEdge * targetSpeed);
-        var sinAngle = Math.Sqrt(1.0 - cosAngle * cosAngle);
+        var cosAngle = distanceToTrailingEdge > 1e-9
+            ? toTrailingEdge.DotProduct(targetVelocity) / (distanceToTrailingEdge * targetSpeed)
+            : 1.0;
+        var sinAngle = Math.Sqrt(Math.Max(0, 1.0 - cosAngle * cosAngle));
 
         // Trailing edge correction factors
         var speedDifference = projectileSpeed - targetSpeed;
@@ -411,7 +413,13 @@ public sealed class PredictionEngine : IPredictionEngine
         var speedRatio = targetSpeed / projectileSpeed;
         var catchUpFactor = 1 - speedRatio;
         var angleDivisor = 2 - hitboxRatio - cosAngle / hitboxRatio;
-        var correctionMultiplier = sinAngle * (1 + catchUpFactor * hitboxRatio / angleDivisor);
+
+        // Guard against division by zero (e.g. when hitboxRatio ~ 1 and cosAngle ~ 1)
+        var correctionMultiplier = 0.0;
+        if (Math.Abs(angleDivisor) > 1e-9)
+        {
+            correctionMultiplier = sinAngle * (1 + catchUpFactor * hitboxRatio / angleDivisor);
+        }
 
         // Quadratic coefficients: at² + bt + c = 0
         var quadA = targetVelocity.DotProduct(targetVelocity) - projectileSpeedSqr;

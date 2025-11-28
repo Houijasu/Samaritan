@@ -47,6 +47,8 @@ public class SimulationGame : Game
     private Point2D _editCasterPosition;
     private Point2D _editTargetStart;
     private Vector2D _editTargetVelocity;
+    private Vector2D _editDirection = new(1, 0); // Remember direction even when stationary
+    private Vector2D _dragOffset; // Offset from handle center to mouse when drag started
     private const double EditTargetSpeed = 350.0; // Default movement speed
 
     // World to screen transform (1 unit = 0.5 pixels, centered)
@@ -109,6 +111,16 @@ public class SimulationGame : Game
         _editCasterPosition = scenario.CasterPosition;
         _editTargetStart = scenario.TargetMovement.GetPosition(0);
         _editTargetVelocity = scenario.TargetMovement.GetVelocity(0);
+
+        // Remember direction for the direction handle
+        if (_editTargetVelocity.Length > 1)
+        {
+            _editDirection = _editTargetVelocity.Normalize();
+        }
+        else
+        {
+            _editDirection = new Vector2D(1, 0); // Default right
+        }
 
         _runner.LoadScenario(scenario);
         _isPaused = false; // Auto-start so user can see target moving
@@ -206,71 +218,82 @@ public class SimulationGame : Game
         var mousePressed = mouseState.LeftButton == ButtonState.Pressed;
         var wasPressed = _previousMouseState.LeftButton == ButtonState.Pressed;
 
-        // Direction handle position (200 units in velocity direction from target start)
-        var directionHandlePos = _editTargetVelocity.Length > 1
-            ? _editTargetStart + _editTargetVelocity.Normalize().ScaleBy(200)
-            : new Point2D(_editTargetStart.X + 200, _editTargetStart.Y);
+        // Direction handle position (200 units in direction from target start)
+        var directionHandlePos = _editTargetStart + _editDirection.ScaleBy(200);
 
         const double grabRadius = 80.0; // In world units (80 * 0.5 = 40 pixels)
 
         if (mousePressed && !wasPressed)
         {
-            // Mouse just pressed - check what to grab
+            // Mouse just pressed - check what to grab (prioritize closest)
             var distToCaster = mouseWorld.DistanceTo(_editCasterPosition);
-            var distToTargetStart = mouseWorld.DistanceTo(_editTargetStart);
-            var distToCurrentTarget = mouseWorld.DistanceTo(_runner.State.TargetPosition);
+            var distToTarget = mouseWorld.DistanceTo(_editTargetStart);
             var distToDirection = mouseWorld.DistanceTo(directionHandlePos);
 
-            if (distToCaster < grabRadius)
+            // Find the closest handle within grab radius
+            var minDist = double.MaxValue;
+            var selectedMode = DragMode.None;
+            Point2D handlePos = default;
+
+            if (distToCaster < grabRadius && distToCaster < minDist)
             {
-                _dragMode = DragMode.Caster;
-                _isPaused = true;
+                minDist = distToCaster;
+                selectedMode = DragMode.Caster;
+                handlePos = _editCasterPosition;
             }
-            else if (distToTargetStart < grabRadius || distToCurrentTarget < grabRadius)
+            if (distToTarget < grabRadius && distToTarget < minDist)
             {
-                _dragMode = DragMode.Target;
-                _isPaused = true;
-                // Snap start to mouse immediately and update
-                _editTargetStart = mouseWorld;
-                var editedScenario = CreateEditedScenario();
-                _runner.LoadScenario(editedScenario);
+                minDist = distToTarget;
+                selectedMode = DragMode.Target;
+                handlePos = _editTargetStart;
             }
-            else if (distToDirection < grabRadius)
+            if (distToDirection < grabRadius && distToDirection < minDist)
             {
-                _dragMode = DragMode.Direction;
+                minDist = distToDirection;
+                selectedMode = DragMode.Direction;
+                handlePos = directionHandlePos;
+            }
+
+            if (selectedMode != DragMode.None)
+            {
+                _dragMode = selectedMode;
                 _isPaused = true;
+                // Store offset from handle center to mouse position
+                _dragOffset = mouseWorld - handlePos;
             }
         }
         else if (!mousePressed && wasPressed)
         {
-            // Mouse released - apply changes and reload scenario
+            // Mouse released - finalize drag
             if (_dragMode != DragMode.None)
             {
-                var editedScenario = CreateEditedScenario();
-                _runner.LoadScenario(editedScenario);
                 _dragMode = DragMode.None;
+                // Scenario already updated during drag, just reset mode
             }
         }
         else if (mousePressed && _dragMode != DragMode.None)
         {
-            // Dragging - update positions
+            // Dragging - update positions with offset
+            var targetPos = mouseWorld - _dragOffset;
             bool changed = false;
+
             switch (_dragMode)
             {
                 case DragMode.Caster:
-                    _editCasterPosition = mouseWorld;
+                    _editCasterPosition = targetPos;
                     changed = true;
                     break;
                 case DragMode.Target:
-                    _editTargetStart = mouseWorld;
+                    _editTargetStart = targetPos;
                     changed = true;
                     break;
                 case DragMode.Direction:
-                    // Direction is relative to target start, scaled to speed
-                    var direction = (mouseWorld - _editTargetStart);
+                    // Direction is from target start to handle position
+                    var direction = targetPos - _editTargetStart;
                     if (direction.Length > 10)
                     {
-                        _editTargetVelocity = direction.Normalize().ScaleBy(EditTargetSpeed);
+                        _editDirection = direction.Normalize();
+                        _editTargetVelocity = _editDirection.ScaleBy(EditTargetSpeed);
                     }
                     else
                     {
@@ -311,18 +334,14 @@ public class SimulationGame : Game
         // Draw grid
         _gridRenderer.Draw();
 
-        // Determine which scenario to draw (base or edited)
-        var scenarioToDraw = _dragMode != DragMode.None
-            ? CreateEditedScenario()
-            : _scenarios[_currentScenarioIndex];
+        // Always use edited scenario so entities match the drag handles
+        var scenarioToDraw = CreateEditedScenario();
 
         // Draw simulation entities
         _entityRenderer.Draw(_runner.State, scenarioToDraw);
 
-        // Always draw drag handles so user knows they can interact
-        var directionHandlePos = _editTargetVelocity.Length > 1
-            ? _editTargetStart + _editTargetVelocity.Normalize().ScaleBy(200)
-            : new Point2D(_editTargetStart.X + 200, _editTargetStart.Y);
+        // Direction handle position (200 units in direction from target start)
+        var directionHandlePos = _editTargetStart + _editDirection.ScaleBy(200);
 
         _entityRenderer.DrawDragHandles(
             _editCasterPosition,
