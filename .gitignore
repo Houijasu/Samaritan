@@ -1,0 +1,26 @@
+# Build results
+bin/
+obj/
+out/
+
+# IDE
+.idea/
+.vs/
+*.user
+*.suo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# MonoGame Content
+*.xnb
+
+# Claude Code
+.claude/
+
+# Serena
+.serena/
+
+# Factory
+.factory/

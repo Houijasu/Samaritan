@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="Samaritan.Tests/Samaritan.Tests.csproj" />
+  <Project Path="Samaritan/Samaritan.csproj" />
+  <Project Path="Samaritan.Simulation/Samaritan.Simulation.csproj" />
+</Solution>
