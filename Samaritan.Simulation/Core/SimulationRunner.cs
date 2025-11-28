@@ -14,7 +14,7 @@ using Samaritan.Simulation.Scenarios;
 public class SimulationRunner
 {
     private readonly PredictionEngine _engine = new();
-    private readonly SimulationLogger _logger = new(); // Use default "simulation_results.csv"
+    private readonly SimulationLogger _logger = new();
     private Scenario? _scenario;
 
     public SimulationState State { get; } = new();
@@ -50,20 +50,39 @@ public class SimulationRunner
     {
         if (_scenario is null) return;
 
-        // Create movement tracker with initial state
-        var tracker = new MovementTracker { HitboxRadius = _scenario.HitboxRadius };
-        tracker.Update(_scenario.TargetMovement.GetPosition(0), 0);
-
-        // Add velocity sample if moving
         var velocity = _scenario.TargetMovement.GetVelocity(0);
-        if (velocity.Length > 0.001)
+        MovementState movementState;
+
+        // For waypoint patterns, create Pathing state directly with all waypoints
+        if (_scenario.TargetMovement is MovementPattern.Waypoints waypoints)
         {
-            var nextPos = _scenario.TargetMovement.GetPosition(0.1);
-            tracker.Update(nextPos, 0.1);
+            movementState = new MovementState.Pathing(
+                Waypoints: waypoints.Points,
+                Speed: waypoints.Speed,
+                CurrentIndex: 1,        // Moving toward second waypoint
+                ProgressOnSegment: 0);  // At start of first segment
+        }
+        else
+        {
+            // For other patterns, use tracker to infer movement
+            var tracker = new MovementTracker { HitboxRadius = _scenario.HitboxRadius };
+            tracker.Update(_scenario.TargetMovement.GetPosition(0), 0);
+
+            if (velocity.Length > 0.001)
+            {
+                var nextPos = _scenario.TargetMovement.GetPosition(0.1);
+                tracker.Update(nextPos, 0.1);
+            }
+
+            movementState = tracker.CurrentState;
         }
 
-        // Get prediction
-        State.Prediction = _engine.Predict(_scenario.Skillshot, _scenario.CasterPosition, tracker);
+        // Get prediction using the movement state
+        State.Prediction = _engine.PredictFromState(
+            _scenario.Skillshot,
+            _scenario.CasterPosition,
+            movementState,
+            _scenario.HitboxRadius);
 
         State.Prediction.Match(
             hit: h =>
@@ -85,11 +104,11 @@ public class SimulationRunner
             outOfRange: _ => { },
             unreachable: _ => { });
 
-        // Get exact prediction (comparison)
+        // Get exact prediction for comparison with fast approximation
         var exactResult = _engine.PredictExact(
             _scenario.Skillshot,
             _scenario.CasterPosition,
-            tracker.CurrentState,
+            movementState,
             _scenario.HitboxRadius);
 
         if (exactResult is PredictionResult.Hit exactHit)
@@ -129,7 +148,6 @@ public class SimulationRunner
                 break;
 
             case SimulationPhase.Complete:
-                // Simulation done
                 break;
         }
     }
@@ -264,7 +282,7 @@ public class SimulationRunner
         var range = GetSkillshotRange(_scenario.Skillshot);
         var distance = _scenario.CasterPosition.DistanceTo(State.ProjectilePosition.Value);
 
-        return distance > range + 50; // Small buffer
+        return distance > range + 50; // Buffer to account for hitbox radius
     }
 
     private static double GetSkillshotDelay(Skillshot skillshot)

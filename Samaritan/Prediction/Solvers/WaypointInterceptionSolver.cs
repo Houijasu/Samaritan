@@ -1,4 +1,4 @@
-﻿namespace Samaritan.Prediction.Solvers;
+namespace Samaritan.Prediction.Solvers;
 
 using MathNet.Numerics;
 using MathNet.Spatial.Euclidean;
@@ -16,6 +16,10 @@ public sealed class WaypointInterceptionSolver : IInterceptionSolver
 {
     private readonly PredictionConfig _config;
 
+    /// <summary>
+    /// Creates a waypoint interception solver.
+    /// </summary>
+    /// <param name="config">Prediction configuration (uses default if null).</param>
     public WaypointInterceptionSolver(PredictionConfig? config = null)
     {
         _config = config ?? PredictionConfig.Default;
@@ -49,14 +53,13 @@ public sealed class WaypointInterceptionSolver : IInterceptionSolver
         var targetSpeed = segments[0].Velocity.Length;
 
         // Cut path by (delay * targetSpeed - hitbox) to account for cast delay and trailing edge
-        // This is the clean approach from the working C++ code
         var cutLength = delay * targetSpeed - hitboxRadius;
         var cutSegments = CutPath(segments, cutLength);
 
         if (cutSegments.Count == 0)
             return null;
 
-        // Now use CLEAN interception formula (no hitbox in quadratic!)
+        // Iterate through segments to find interception point
         double tTotal = 0;
         const double Epsilon = 1e-4;
         var sqrSpeed = speed * speed;
@@ -67,7 +70,7 @@ public sealed class WaypointInterceptionSolver : IInterceptionSolver
             var velocity = segment.Velocity;
             var duration = segment.Duration;
 
-            // Clean quadratic: a = v² - p², b = 2(diff·v - p²·tTotal), c = diff² - p²·tTotal²
+            // Quadratic formula: a = v² - p², b = 2(diff·v - p²·tTotal), c = diff² - p²·tTotal²
             var a = velocity.DotProduct(velocity) - sqrSpeed;
             var b = 2.0 * (diff.DotProduct(velocity) - sqrSpeed * tTotal);
             var c = diff.DotProduct(diff) - sqrSpeed * tTotal * tTotal;
@@ -97,7 +100,7 @@ public sealed class WaypointInterceptionSolver : IInterceptionSolver
             tTotal += duration;
         }
 
-        // Fallback: return last point
+        // No valid interception found
         return null;
     }
 
@@ -165,27 +168,5 @@ public sealed class WaypointInterceptionSolver : IInterceptionSolver
             arc: a => ((double)a.Delay, (double)a.Speed, (double)a.OuterRadius),
             rectangle: r => ((double)r.Delay, (double)r.Speed, (double)r.Range),
             vectorRectangle: v => ((double)v.Delay, (double)v.Speed, (double)(v.Range + v.MaxLength)));
-    }
-
-    private static double GetEffectiveRadius(Skillshot skillshot, double hitboxRadius)
-    {
-        return skillshot.Match(
-            linear: l => l.Width / 2.0 + hitboxRadius,
-            circular: c => c.Radius + hitboxRadius,
-            cone: _ => hitboxRadius,
-            arc: a => a.Width / 2.0 + hitboxRadius,
-            rectangle: r => r.Width / 2.0 + hitboxRadius,
-            vectorRectangle: v => v.Width / 2.0 + hitboxRadius);
-    }
-
-    private static double GetSkillshotWidth(Skillshot skillshot)
-    {
-        return skillshot.Match(
-            linear: l => l.Width,
-            circular: c => c.Radius * 2,
-            cone: _ => 0,
-            arc: a => a.Width,
-            rectangle: r => r.Width,
-            vectorRectangle: v => v.Width);
     }
 }

@@ -114,6 +114,9 @@ public class SimulationState
         }
     }
 
+    /// <summary>
+    /// Resets all state to initial values.
+    /// </summary>
     public void Reset()
     {
         Time = 0;

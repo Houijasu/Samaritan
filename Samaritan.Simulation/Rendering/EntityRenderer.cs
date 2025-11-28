@@ -7,8 +7,6 @@ using Microsoft.Xna.Framework.Graphics;
 
 using Samaritan.Simulation.Core;
 using Samaritan.Simulation.Scenarios;
-
-// Import DragMode from the main namespace
 using Samaritan.Simulation;
 
 /// <summary>
@@ -19,7 +17,6 @@ public class EntityRenderer
     private readonly GraphicsDevice _device;
     private readonly BasicEffect _effect;
     private readonly float _scale;
-    private readonly Vector2 _offset;
 
     // Colors
     private static readonly Color CasterColor = new(80, 130, 220);
@@ -37,7 +34,6 @@ public class EntityRenderer
     {
         _device = device;
         _scale = scale;
-        // _offset = offset; // Offset is now dynamic based on Viewport
 
         _effect = new BasicEffect(device)
         {

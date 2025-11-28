@@ -1,4 +1,4 @@
-﻿namespace Samaritan.Prediction.Movement;
+namespace Samaritan.Prediction.Movement;
 
 using Dunet;
 
@@ -192,7 +192,7 @@ public static class MovementStateExtensions
 
     private static Point2D PredictChannelingPosition(MovementState.Channeling channel, double deltaTime)
     {
-        // s = s0 + v*t + 0.5*a*t^2
+        // Calculate displacement using average velocity over time interval
         var newSpeed = channel.Speed + channel.Acceleration * deltaTime;
         var avgSpeed = (channel.Speed + newSpeed) / 2;
         return channel.Position + channel.Direction.ScaleBy(avgSpeed * deltaTime);
@@ -227,10 +227,10 @@ public static class MovementStateExtensions
             return new Point2D(0, 0);
 
         if (pathing.CurrentIndex >= pathing.Waypoints.Count)
-            return pathing.Waypoints[^1]; // At final waypoint
+            return pathing.Waypoints[^1];
 
         if (pathing.CurrentIndex == 0)
-            return pathing.Waypoints[0]; // At start
+            return pathing.Waypoints[0];
 
         var segmentStart = pathing.Waypoints[pathing.CurrentIndex - 1];
         var segmentEnd = pathing.Waypoints[pathing.CurrentIndex];
@@ -259,10 +259,7 @@ public static class MovementStateExtensions
         if (pathing.Waypoints.Count == 1 || pathing.CurrentIndex >= pathing.Waypoints.Count)
             return pathing.Waypoints[^1];
 
-        // Calculate current position
         var currentPos = GetPathingPosition(pathing);
-
-        // Traverse path segments
         var remainingDistance = pathing.Speed * deltaTime;
         var segmentIndex = pathing.CurrentIndex > 0 ? pathing.CurrentIndex - 1 : 0;
         var posOnPath = currentPos;
@@ -274,18 +271,15 @@ public static class MovementStateExtensions
 
             if (remainingDistance < distToEnd)
             {
-                // Stop within this segment
                 var direction = (segmentEnd - posOnPath).Normalize();
                 return posOnPath + direction.ScaleBy(remainingDistance);
             }
 
-            // Move to end of segment and continue
             remainingDistance -= distToEnd;
             posOnPath = segmentEnd;
             segmentIndex++;
         }
 
-        // Reached final waypoint
         return pathing.Waypoints[^1];
     }
 
@@ -294,7 +288,6 @@ public static class MovementStateExtensions
         if (pathing.Waypoints.Count < 2)
             return new Vector2D(0, 0);
 
-        // Find which segment we'll be on at deltaTime
         var currentPos = GetPathingPosition(pathing);
         var remainingDistance = pathing.Speed * deltaTime;
         var segmentIndex = pathing.CurrentIndex > 0 ? pathing.CurrentIndex - 1 : 0;
@@ -307,7 +300,6 @@ public static class MovementStateExtensions
 
             if (remainingDistance < distToEnd)
             {
-                // We'll be on this segment
                 var direction = (segmentEnd - posOnPath).Normalize();
                 return direction.ScaleBy(pathing.Speed);
             }
@@ -317,7 +309,6 @@ public static class MovementStateExtensions
             segmentIndex++;
         }
 
-        // Reached end - no more velocity
         return new Vector2D(0, 0);
     }
 
@@ -333,21 +324,23 @@ public static class MovementStateExtensions
         var currentPos = GetPathingPosition(pathing);
         var accumulatedTime = 0.0;
 
-        // First segment: from current position to current target waypoint
         var firstEnd = pathing.Waypoints[pathing.CurrentIndex];
         var firstDist = currentPos.DistanceTo(firstEnd);
-        var firstDuration = firstDist / pathing.Speed;
+        
+        if (firstDist > 1e-4)
+        {
+            var firstDuration = firstDist / pathing.Speed;
 
-        yield return new PathSegment(
-            currentPos,
-            firstEnd,
-            accumulatedTime,
-            accumulatedTime + firstDuration,
-            pathing.Speed);
+            yield return new PathSegment(
+                currentPos,
+                firstEnd,
+                accumulatedTime,
+                accumulatedTime + firstDuration,
+                pathing.Speed);
 
-        accumulatedTime += firstDuration;
+            accumulatedTime += firstDuration;
+        }
 
-        // Remaining segments
         for (var i = pathing.CurrentIndex; i < pathing.Waypoints.Count - 1; i++)
         {
             var start = pathing.Waypoints[i];

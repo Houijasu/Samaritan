@@ -217,10 +217,10 @@ public sealed class PredictionEngine : IPredictionEngine
     }
 
     /// <summary>
-    /// Solves interception for targets following waypoint paths using the clean approach.
-    /// Cuts the path by (delay * targetSpeed - hitbox), then uses clean quadratic.
+    /// Solves interception for targets following waypoint paths.
+    /// Cuts the path by (delay * targetSpeed - hitbox), then solves using quadratic formula.
     /// </summary>
-    private PredictionResult SolveWaypointInterception(
+    private static PredictionResult SolveWaypointInterception(
         Skillshot skillshot,
         Point2D casterPosition,
         MovementState.Pathing pathing,
@@ -239,14 +239,13 @@ public sealed class PredictionEngine : IPredictionEngine
         // Cut path by (delay * speed - hitbox) to account for:
         // 1. Where target will be when projectile fires (delay * speed)
         // 2. Hitting the near edge of hitbox (-hitbox)
-        // Reference: SFML missile interception demo
         var cutLength = effectiveDelay * targetSpeed - effectiveRadius;
         var cutSegments = CutPath(segments, cutLength);
 
         if (cutSegments.Count == 0)
             return new PredictionResult.Unreachable("Path cut resulted in empty path");
 
-        // Clean quadratic formula (hitbox handled via path cutting)
+        // Quadratic formula (hitbox handled via path cutting)
         // a = v² - p², b = 2(diff·v - p²·tTotal), c = diff² - p²·tTotal²
         var sqrSpeed = projectileSpeed * projectileSpeed;
         double tTotal = 0;
@@ -258,7 +257,7 @@ public sealed class PredictionEngine : IPredictionEngine
             var velocity = segment.Velocity;
             var duration = segment.Duration;
 
-            // Clean quadratic coefficients
+            // Quadratic coefficients
             var a = velocity.DotProduct(velocity) - sqrSpeed;
             var b = 2.0 * (diff.DotProduct(velocity) - sqrSpeed * tTotal);
             var c = diff.DotProduct(diff) - sqrSpeed * tTotal * tTotal;
@@ -299,7 +298,8 @@ public sealed class PredictionEngine : IPredictionEngine
     }
 
     /// <summary>
-    /// Cuts a path by the specified distance. Positive advances, negative extends backwards.
+    /// Cuts a path by the specified distance.
+    /// Positive distance advances along the path, negative distance extends backwards.
     /// </summary>
     private static List<PathSegment> CutPath(List<PathSegment> segments, double distance)
     {
@@ -353,8 +353,8 @@ public sealed class PredictionEngine : IPredictionEngine
     }
 
     /// <summary>
-    /// Solves the interception problem for a moving target (single segment).
-    /// Uses path cutting for hitbox, then applies angle-dependent trailing edge correction.
+    /// Solves the interception problem for a moving target traveling in a straight line.
+    /// Applies angle-dependent trailing edge correction for accurate hitbox handling.
     /// </summary>
     private static (double Time, Point2D AimPoint)? SolveTrailingEdgeInterception(
         Point2D casterPosition,
@@ -422,13 +422,13 @@ public sealed class PredictionEngine : IPredictionEngine
         var (root1, root2) = FindRoots.Quadratic(quadC, quadB, quadA);
 
         // Find minimum valid real root
-        const double imaginaryTolerance = 1e-9;
+        const double ImaginaryTolerance = 1e-9;
         var maxFlightTime = maxRange / projectileSpeed;
         var interceptTime = double.MaxValue;
 
-        if (Math.Abs(root1.Imaginary) < imaginaryTolerance && root1.Real >= 0 && root1.Real <= maxFlightTime)
+        if (Math.Abs(root1.Imaginary) < ImaginaryTolerance && root1.Real >= 0 && root1.Real <= maxFlightTime)
             interceptTime = Math.Min(interceptTime, root1.Real);
-        if (Math.Abs(root2.Imaginary) < imaginaryTolerance && root2.Real >= 0 && root2.Real <= maxFlightTime)
+        if (Math.Abs(root2.Imaginary) < ImaginaryTolerance && root2.Real >= 0 && root2.Real <= maxFlightTime)
             interceptTime = Math.Min(interceptTime, root2.Real);
 
         if (interceptTime >= double.MaxValue)
@@ -487,26 +487,7 @@ public sealed class PredictionEngine : IPredictionEngine
         const double ImagTol = 1e-9;
         var tIntercept = double.MaxValue;
 
-        // The interception time T must be greater than the launch time (effectiveDelay)
-        // However, with reducedDelay, we are solving for the time the center reaches the target center.
-        // Wait, the equation |P+VT - C| = s(T - d') solves for when the projectile (started at d') hits the target.
-        // Since d' < d, and we want physical validity:
-        // The projectile physically launches at 'd'.
-        // Impact happens at T.
-        // Flight time = T - d.
-        // Distance = s * (T - d).
-        // Condition: |P(T) - C| = s * (T - d) + R
-        // |P+VT - C| - R = s(T - d)
-        // This is not exactly quadratic unless we square it.
-        // (|P+VT-C| - R)^2 = s^2 (T-d)^2
-        // This is hard to solve.
-
-        // My proposed "Effective Delay" shortcut:
-        // Assume |P+VT - C| approx = s(T - d) + R
-        // => |P+VT - C| = s(T - d + R/s) = s(T - (d - R/s))
-        // So yes, d' = d - R/s.
-        // The validity condition is T >= d (projectile must be launched).
-
+        // The interception time must be >= effectiveDelay (projectile must be launched)
         if (Math.Abs(root1.Imaginary) < ImagTol && root1.Real >= effectiveDelay)
             tIntercept = Math.Min(tIntercept, root1.Real);
         if (Math.Abs(root2.Imaginary) < ImagTol && root2.Real >= effectiveDelay)
@@ -586,8 +567,8 @@ public sealed class PredictionEngine : IPredictionEngine
     {
         return skillshot.Match(
             linear: l => (double)l.Speed,
-            circular: _ => double.MaxValue, // Instant
-            cone: _ => double.MaxValue,     // Instant
+            circular: _ => double.MaxValue, // Instant cast (no projectile travel time)
+            cone: _ => double.MaxValue,     // Instant cast (no projectile travel time)
             arc: a => (double)a.Speed,
             rectangle: r => (double)r.Speed,
             vectorRectangle: v => (double)v.Speed);
@@ -602,25 +583,10 @@ public sealed class PredictionEngine : IPredictionEngine
         return skillshot.Match(
             linear: l => l.Width / 2.0 + hitboxRadius,
             circular: c => c.Radius + hitboxRadius,
-            cone: _ => hitboxRadius, // Cone is instant area effect
+            cone: _ => hitboxRadius, // Cone has no width (instant area-of-effect from point)
             arc: a => a.Width / 2.0 + hitboxRadius,
             rectangle: r => r.Width / 2.0 + hitboxRadius,
             vectorRectangle: v => v.Width / 2.0 + hitboxRadius);
-    }
-
-    /// <summary>
-    /// Gets the skillshot's width (without hitbox radius).
-    /// Used for trailing edge offset to ensure visual contact.
-    /// </summary>
-    private static double GetSkillshotWidth(Skillshot skillshot)
-    {
-        return skillshot.Match(
-            linear: l => l.Width,
-            circular: c => c.Radius * 2,
-            cone: _ => 0,
-            arc: a => a.Width,
-            rectangle: r => r.Width,
-            vectorRectangle: v => v.Width);
     }
 
     private static string CreateCacheKey(Skillshot skillshot, Point2D caster, MovementState target)

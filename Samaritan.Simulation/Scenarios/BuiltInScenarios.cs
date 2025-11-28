@@ -9,6 +9,10 @@ using Samaritan.Simulation.Core;
 /// </summary>
 public static class BuiltInScenarios
 {
+    /// <summary>
+    /// Gets all built-in test scenarios.
+    /// </summary>
+    /// <returns>Array of all predefined scenarios.</returns>
     public static Scenario[] GetAll() =>
     [
         LinearVsStationary(),

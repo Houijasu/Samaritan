@@ -51,7 +51,6 @@ public class SimulationGame : Game
 
     // World to screen transform (1 unit = 0.5 pixels, centered)
     private const float WorldScale = 0.5f;
-    private Vector2 _worldOffset;
 
     public SimulationGame()
     {
@@ -85,9 +84,9 @@ public class SimulationGame : Game
     {
         _spriteBatch = new SpriteBatch(GraphicsDevice);
 
-        // Create renderers
-        _gridRenderer = new GridRenderer(GraphicsDevice, WorldScale, _worldOffset);
-        _entityRenderer = new EntityRenderer(GraphicsDevice, WorldScale, _worldOffset);
+        // Create renderers (offset is calculated dynamically based on viewport)
+        _gridRenderer = new GridRenderer(GraphicsDevice, WorldScale, Vector2.Zero);
+        _entityRenderer = new EntityRenderer(GraphicsDevice, WorldScale, Vector2.Zero);
         _hudRenderer = new HudRenderer(GraphicsDevice, _spriteBatch);
 
         // Load scenarios - start with scenario 2 (moving target) for better demo

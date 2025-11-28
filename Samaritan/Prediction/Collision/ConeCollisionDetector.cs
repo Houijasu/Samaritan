@@ -38,7 +38,7 @@ public sealed class ConeCollisionDetector : ICollisionDetector
         // Check angle
         if (distance < 0.001)
         {
-            // Target at origin, always hit
+            // Target is at the origin point, always considered a hit
             return true;
         }
 
