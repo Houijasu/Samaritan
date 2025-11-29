@@ -1,4 +1,4 @@
-namespace Samaritan.Prediction.Engine;
+﻿namespace Samaritan.Prediction.Engine;
 
 using System.Diagnostics;
 
@@ -373,6 +373,10 @@ public sealed class PredictionEngine : IPredictionEngine
             var toTarget = targetPosition - casterPosition;
             var distance = toTarget.Length;
 
+            // Caster on or very close to target - instant hit
+            if (distance < 1e-9)
+                return (castDelay, targetPosition);
+
             if (distance <= hitbox)
                 return (castDelay, targetPosition);
 
@@ -385,70 +389,63 @@ public sealed class PredictionEngine : IPredictionEngine
             return (castDelay + flightTime, nearEdge);
         }
 
-        // Cut path by (delay * speed - hitbox) to get trailing edge start position
-        var cutDistance = castDelay * targetSpeed - hitbox;
-        var targetDirection = targetVelocity.Normalize();
-        var trailingEdgeStart = targetPosition + targetDirection.ScaleBy(cutDistance);
-
-        // Vector from caster to trailing edge start
-        var toTrailingEdge = trailingEdgeStart - casterPosition;
-        var distanceToTrailingEdge = toTrailingEdge.Length;
+        // T_optimal approach: First compute T_center (aiming at target center),
+        // then adjust to get earliest hit time using sin(θ) formula
+        var diff = targetPosition - casterPosition;
         var projectileSpeedSqr = projectileSpeed * projectileSpeed;
+        var targetSpeedSqr = targetVelocity.DotProduct(targetVelocity);
+        var diffDotVel = diff.DotProduct(targetVelocity);
+        var diffSqr = diff.DotProduct(diff);
 
-        // Angle between caster-to-target and target velocity
-        var cosAngle = distanceToTrailingEdge > 1e-9
-            ? toTrailingEdge.DotProduct(targetVelocity) / (distanceToTrailingEdge * targetSpeed)
-            : 1.0;
-        var sinAngle = Math.Sqrt(Math.Max(0, 1.0 - cosAngle * cosAngle));
+        // Standard quadratic for T_center: at² + bt + c = 0
+        // Derived from: s²(t-d)² = |D + Vt|²
+        // Using correct signs: a = s² - v², b = -2(s²d + D·V), c = s²d² - D²
+        var quadA = projectileSpeedSqr - targetSpeedSqr;
+        var quadB = -2.0 * (projectileSpeedSqr * castDelay + diffDotVel);
+        var quadC = projectileSpeedSqr * castDelay * castDelay - diffSqr;
 
-        // Trailing edge correction factors
-        var speedDifference = projectileSpeed - targetSpeed;
-        var delayDistance = targetSpeed * castDelay;
-        var extendedHitbox = hitbox + delayDistance;
-        var baseCorrection = speedDifference * extendedHitbox;
-
-        // Physically-derived correction multiplier using dimensionless ratios
-        // M = sinθ × (1 + catchUpFactor × hitboxRatio / angleDivisor)
-        var hitboxRatio = hitbox / extendedHitbox;
-        var speedRatio = targetSpeed / projectileSpeed;
-        var catchUpFactor = 1 - speedRatio;
-        var angleDivisor = 2 - hitboxRatio - cosAngle / hitboxRatio;
-
-        // Guard against division by zero (e.g. when hitboxRatio ~ 1 and cosAngle ~ 1)
-        var correctionMultiplier = 0.0;
-        if (Math.Abs(angleDivisor) > 1e-9)
-        {
-            correctionMultiplier = sinAngle * (1 + catchUpFactor * hitboxRatio / angleDivisor);
-        }
-
-        // Quadratic coefficients: at² + bt + c = 0
-        var quadA = targetVelocity.DotProduct(targetVelocity) - projectileSpeedSqr;
-        var quadB = 2.0 * (toTrailingEdge.DotProduct(targetVelocity) - baseCorrection * correctionMultiplier);
-        var quadC = toTrailingEdge.DotProduct(toTrailingEdge);
-
-        // Solve quadratic using robust numerical method
-        var (root1, root2) = FindRoots.Quadratic(quadC, quadB, quadA);
-
-        // Find minimum valid real root
-        const double ImaginaryTolerance = 1e-9;
-        var maxFlightTime = maxRange / projectileSpeed;
-        var interceptTime = double.MaxValue;
-
-        if (Math.Abs(root1.Imaginary) < ImaginaryTolerance && root1.Real >= 0 && root1.Real <= maxFlightTime)
-            interceptTime = Math.Min(interceptTime, root1.Real);
-        if (Math.Abs(root2.Imaginary) < ImaginaryTolerance && root2.Real >= 0 && root2.Real <= maxFlightTime)
-            interceptTime = Math.Min(interceptTime, root2.Real);
-
-        if (interceptTime >= double.MaxValue)
+        var discriminant = quadB * quadB - 4 * quadA * quadC;
+        if (discriminant < 0)
             return null;
 
-        var totalTime = castDelay + interceptTime;
-        var aimPoint = trailingEdgeStart + targetVelocity.ScaleBy(interceptTime);
+        var sqrtDisc = Math.Sqrt(discriminant);
+        var t1 = (-quadB + sqrtDisc) / (2 * quadA);
+        var t2 = (-quadB - sqrtDisc) / (2 * quadA);
+
+        // Find T_center - the time when projectile would hit target center
+        var maxTime = castDelay + maxRange / projectileSpeed;
+        var tCenter = double.MaxValue;
+        if (t1 >= castDelay && t1 <= maxTime) tCenter = Math.Min(tCenter, t1);
+        if (t2 >= castDelay && t2 <= maxTime) tCenter = Math.Min(tCenter, t2);
+
+        if (tCenter >= double.MaxValue)
+            return null;
+
+        // Compute angle θ at T_center
+        // θ is angle between aim direction and target velocity
+        var targetAtTCenter = targetPosition + targetVelocity.ScaleBy(tCenter);
+        var aimDirection = (targetAtTCenter - casterPosition).Normalize();
+        var cosTheta = aimDirection.DotProduct(targetVelocity) / targetSpeed;
+        var sinTheta = Math.Sqrt(Math.Max(0, 1.0 - cosTheta * cosTheta));
+
+        // T_optimal ≈ T_center - r / (|V| * sin(θ))
+        // This gives the earliest time when projectile edge touches target edge
+        var tOptimal = tCenter;
+        if (sinTheta > 0.01) // Avoid division by near-zero
+        {
+            tOptimal = tCenter - hitbox / (targetSpeed * sinTheta);
+        }
+
+        // Ensure T_optimal is valid (not before projectile launches)
+        if (tOptimal < castDelay)
+            tOptimal = castDelay;
+
+        var aimPoint = targetPosition + targetVelocity.ScaleBy(tOptimal);
 
         if (casterPosition.DistanceTo(aimPoint) > maxRange)
             return null;
 
-        return (totalTime, aimPoint);
+        return (tOptimal, aimPoint);
     }
 
     /// <summary>

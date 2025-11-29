@@ -1,4 +1,4 @@
-namespace Samaritan.Prediction.Solvers;
+﻿namespace Samaritan.Prediction.Solvers;
 
 using MathNet.Numerics;
 using MathNet.Spatial.Euclidean;

@@ -5,9 +5,9 @@ using MathNet.Spatial.Euclidean;
 using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
 
+using Samaritan.Simulation;
 using Samaritan.Simulation.Core;
 using Samaritan.Simulation.Scenarios;
-using Samaritan.Simulation;
 
 /// <summary>
 /// Renders simulation entities (caster, target, projectile, skillshot shapes).

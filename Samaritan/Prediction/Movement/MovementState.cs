@@ -1,4 +1,4 @@
-namespace Samaritan.Prediction.Movement;
+﻿namespace Samaritan.Prediction.Movement;
 
 using Dunet;
 
@@ -326,7 +326,7 @@ public static class MovementStateExtensions
 
         var firstEnd = pathing.Waypoints[pathing.CurrentIndex];
         var firstDist = currentPos.DistanceTo(firstEnd);
-        
+
         if (firstDist > 1e-4)
         {
             var firstDuration = firstDist / pathing.Speed;

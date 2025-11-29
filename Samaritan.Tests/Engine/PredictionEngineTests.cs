@@ -1,4 +1,4 @@
-namespace Samaritan.Tests.Engine;
+﻿namespace Samaritan.Tests.Engine;
 
 using MathNet.Spatial.Euclidean;
 
@@ -266,11 +266,11 @@ public class PredictionEngineTests
         // Force effective delay to be 0 by setting Infinite tick rate (1/inf = 0)
         var config = new PredictionConfig { ServerTickRateHz = double.PositiveInfinity };
         var engine = new PredictionEngine(config);
-        
+
         // Delay 0
         var skillshot = new Skillshot.Linear(Delay: 0, Speed: 1000, Width: 100, Range: 2000);
         var casterPos = new Point2D(0, 0);
-        
+
         // Target at (500,0), moving right at speed 100 (away from caster)
         var targetState = new MovementState.Walking(
             new Point2D(500, 0),
@@ -294,7 +294,7 @@ public class PredictionEngineTests
         // CasterPos = TargetPos => distanceToTrailingEdge = 0.
         var skillshot = new Skillshot.Linear(Delay: 1.0f, Speed: 1000, Width: 200, Range: 2000);
         var casterPos = new Point2D(500, 500);
-        
+
         // Target exactly at caster pos
         var targetState = new MovementState.Walking(
             new Point2D(500, 500),
