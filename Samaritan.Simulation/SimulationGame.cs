@@ -44,7 +44,6 @@ public class SimulationGame : Game
 
     // Interactive editing
     private DragMode _dragMode = DragMode.None;
-    private DragMode _hoverMode = DragMode.None;
     private Point2D _editCasterPosition;
     private Point2D _editTargetStart;
     private Vector2D _editTargetVelocity;
@@ -170,9 +169,6 @@ public class SimulationGame : Game
         // Mouse interaction for dragging
         HandleMouseInput(mouseState);
 
-        // Update title with debug info
-        // Window.Title = $"Samaritan - Mode: {_dragMode} Hover: {_hoverMode}";
-
         // Playback controls
         if (WasKeyPressed(keyState, Keys.Space))
         {
@@ -227,49 +223,41 @@ public class SimulationGame : Game
 
         const double grabRadius = 80.0; // In world units (80 * 0.5 = 40 pixels)
 
-        // Update hover mode if not dragging
-        if (_dragMode == DragMode.None)
+        if (mousePressed && !wasPressed)
         {
-            _hoverMode = DragMode.None;
-            var minDist = double.MaxValue;
-
+            // Mouse just pressed - check what to grab (prioritize closest)
             var distToCaster = mouseWorld.DistanceTo(_editCasterPosition);
             var distToTarget = mouseWorld.DistanceTo(_editTargetStart);
             var distToDirection = mouseWorld.DistanceTo(directionHandlePos);
 
+            // Find the closest handle within grab radius
+            var minDist = double.MaxValue;
+            var selectedMode = DragMode.None;
+            Point2D handlePos = default;
+
             if (distToCaster < grabRadius && distToCaster < minDist)
             {
                 minDist = distToCaster;
-                _hoverMode = DragMode.Caster;
+                selectedMode = DragMode.Caster;
+                handlePos = _editCasterPosition;
             }
             if (distToTarget < grabRadius && distToTarget < minDist)
             {
                 minDist = distToTarget;
-                _hoverMode = DragMode.Target;
+                selectedMode = DragMode.Target;
+                handlePos = _editTargetStart;
             }
             if (distToDirection < grabRadius && distToDirection < minDist)
             {
                 minDist = distToDirection;
-                _hoverMode = DragMode.Direction;
+                selectedMode = DragMode.Direction;
+                handlePos = directionHandlePos;
             }
-        }
 
-        if (mousePressed && !wasPressed)
-        {
-            // Mouse just pressed - try to grab hovered item
-            if (_hoverMode != DragMode.None)
+            if (selectedMode != DragMode.None)
             {
-                _dragMode = _hoverMode;
+                _dragMode = selectedMode;
                 _isPaused = true;
-
-                Point2D handlePos = default;
-                switch (_dragMode)
-                {
-                    case DragMode.Caster: handlePos = _editCasterPosition; break;
-                    case DragMode.Target: handlePos = _editTargetStart; break;
-                    case DragMode.Direction: handlePos = directionHandlePos; break;
-                }
-
                 // Store offset from handle center to mouse position
                 _dragOffset = mouseWorld - handlePos;
             }
@@ -277,7 +265,11 @@ public class SimulationGame : Game
         else if (!mousePressed && wasPressed)
         {
             // Mouse released - finalize drag
-            _dragMode = DragMode.None;
+            if (_dragMode != DragMode.None)
+            {
+                _dragMode = DragMode.None;
+                // Scenario already updated during drag, just reset mode
+            }
         }
         else if (mousePressed && _dragMode != DragMode.None)
         {
@@ -355,7 +347,7 @@ public class SimulationGame : Game
             _editCasterPosition,
             _editTargetStart,
             directionHandlePos,
-            _dragMode != DragMode.None ? _dragMode : _hoverMode);
+            _dragMode);
 
         // Draw HUD
         _hudRenderer.Draw(
