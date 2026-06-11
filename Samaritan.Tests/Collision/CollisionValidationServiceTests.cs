@@ -111,12 +111,12 @@ public class CollisionValidationServiceTests
     {
         var skillshot = new Skillshot.Linear(Delay: 0, Speed: 1000, Width: 100, Range: 1000);
         var casterPos = new Point2D(0, 0);
-        var aimDirection = new Vector2D(1, 0);
+        var aimPosition = new Point2D(1000, 0);
         var targetPos = new Point2D(500, 0);
         var targetVel = new Vector2D(0, 0);
 
         var hitTime = _service.SimulateCollision(
-            skillshot, casterPos, aimDirection, targetPos, targetVel, targetHitboxRadius: 50);
+            skillshot, casterPos, aimPosition, targetPos, targetVel, targetHitboxRadius: 50);
 
         Assert.NotNull(hitTime);
         Assert.True(hitTime < 1.0); // Should hit within 1 second
@@ -127,12 +127,12 @@ public class CollisionValidationServiceTests
     {
         var skillshot = new Skillshot.Linear(Delay: 0, Speed: 500, Width: 50, Range: 500);
         var casterPos = new Point2D(0, 0);
-        var aimDirection = new Vector2D(1, 0);
+        var aimPosition = new Point2D(500, 0);
         var targetPos = new Point2D(400, 0);
         var targetVel = new Vector2D(600, 0); // Moving faster than projectile
 
         var hitTime = _service.SimulateCollision(
-            skillshot, casterPos, aimDirection, targetPos, targetVel, targetHitboxRadius: 30, maxTime: 2.0);
+            skillshot, casterPos, aimPosition, targetPos, targetVel, targetHitboxRadius: 30, maxTime: 2.0);
 
         Assert.Null(hitTime);
     }
@@ -142,12 +142,12 @@ public class CollisionValidationServiceTests
     {
         var skillshot = new Skillshot.Linear(Delay: 0, Speed: 1000, Width: 100, Range: 1000);
         var casterPos = new Point2D(0, 0);
-        var aimDirection = new Vector2D(1, 0);
+        var aimPosition = new Point2D(1000, 0);
         var targetPos = new Point2D(500, 200); // Above the line
         var targetVel = new Vector2D(0, -400); // Moving down into path
 
         var hitTime = _service.SimulateCollision(
-            skillshot, casterPos, aimDirection, targetPos, targetVel, targetHitboxRadius: 50, maxTime: 2.0);
+            skillshot, casterPos, aimPosition, targetPos, targetVel, targetHitboxRadius: 50, maxTime: 2.0);
 
         Assert.NotNull(hitTime);
     }

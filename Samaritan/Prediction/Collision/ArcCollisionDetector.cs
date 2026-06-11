@@ -11,7 +11,7 @@ public sealed class ArcCollisionDetector : ICollisionDetector
     public bool WillHit(
         Skillshot skillshot,
         Point2D origin,
-        Vector2D aimDirection,
+        Point2D aimPosition,
         Point2D targetPosition,
         double targetHitboxRadius,
         double timeElapsed)
@@ -26,6 +26,13 @@ public sealed class ArcCollisionDetector : ICollisionDetector
             return false;
         }
 
+        var aimVector = aimPosition - origin;
+        if (aimVector.Length < 1e-9)
+        {
+            return false;
+        }
+
+        var aimDirection = aimVector.Normalize();
         var effectiveWidth = arc.Width / 2.0 + targetHitboxRadius;
 
         // Calculate how far along the arc the skillshot has traveled

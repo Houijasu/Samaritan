@@ -1,4 +1,4 @@
-﻿namespace Samaritan.Prediction.Collision;
+namespace Samaritan.Prediction.Collision;
 
 using MathNet.Spatial.Euclidean;
 
@@ -34,7 +34,7 @@ public sealed class CollisionValidationService
     }
 
     /// <summary>
-    /// Validates whether a skillshot aimed at a direction will hit a target.
+    /// Validates whether a skillshot aimed at a position is hitting a target.
     /// </summary>
     /// <param name="skillshot">The skillshot to validate.</param>
     /// <param name="casterPosition">Position where the skillshot is cast from.</param>
@@ -42,7 +42,7 @@ public sealed class CollisionValidationService
     /// <param name="targetPosition">Current position of the target.</param>
     /// <param name="targetHitboxRadius">Target's hitbox radius.</param>
     /// <param name="timeElapsed">Time since skillshot was cast.</param>
-    /// <returns>True if the skillshot will hit the target.</returns>
+    /// <returns>True if the skillshot will hit.</returns>
     public bool ValidateHit(
         Skillshot skillshot,
         Point2D casterPosition,
@@ -57,12 +57,11 @@ public sealed class CollisionValidationService
             return false;
         }
 
-        var aimDirection = (aimPosition - casterPosition).Normalize();
-        return detector.WillHit(skillshot, casterPosition, aimDirection, targetPosition, targetHitboxRadius, timeElapsed);
+        return detector.WillHit(skillshot, casterPosition, aimPosition, targetPosition, targetHitboxRadius, timeElapsed);
     }
 
     /// <summary>
-    /// Validates whether a skillshot aimed at a direction will hit a target at the predicted time.
+    /// Validates whether a skillshot aimed at a position will hit a target at the predicted time.
     /// Uses the predicted interception time for validation.
     /// </summary>
     /// <param name="skillshot">The skillshot to validate.</param>
@@ -84,8 +83,7 @@ public sealed class CollisionValidationService
             return false;
         }
 
-        var aimDirection = (predictedPosition - casterPosition).Normalize();
-        return detector.WillHit(skillshot, casterPosition, aimDirection, predictedPosition, targetHitboxRadius, interceptionTime);
+        return detector.WillHit(skillshot, casterPosition, predictedPosition, predictedPosition, targetHitboxRadius, interceptionTime);
     }
 
     /// <summary>
@@ -93,7 +91,7 @@ public sealed class CollisionValidationService
     /// </summary>
     /// <param name="skillshot">The skillshot to check.</param>
     /// <param name="casterPosition">Position where the skillshot is cast from.</param>
-    /// <param name="aimDirection">Normalized direction the skillshot is aimed.</param>
+    /// <param name="aimPosition">Position the skillshot is aimed at.</param>
     /// <param name="targetPosition">Target position at time 0.</param>
     /// <param name="targetVelocity">Target velocity.</param>
     /// <param name="targetHitboxRadius">Target's hitbox radius.</param>
@@ -103,7 +101,7 @@ public sealed class CollisionValidationService
     public double? SimulateCollision(
         Skillshot skillshot,
         Point2D casterPosition,
-        Vector2D aimDirection,
+        Point2D aimPosition,
         Point2D targetPosition,
         Vector2D targetVelocity,
         double targetHitboxRadius,
@@ -119,7 +117,7 @@ public sealed class CollisionValidationService
         for (var t = 0.0; t <= maxTime; t += timeStep)
         {
             var currentTargetPos = targetPosition + targetVelocity.ScaleBy(t);
-            if (detector.WillHit(skillshot, casterPosition, aimDirection, currentTargetPos, targetHitboxRadius, t))
+            if (detector.WillHit(skillshot, casterPosition, aimPosition, currentTargetPos, targetHitboxRadius, t))
             {
                 return t;
             }

@@ -252,12 +252,103 @@ public class PredictionEngineTests
         var engine = new PredictionEngine();
         var skillshot = new Skillshot.VectorRectangle(Delay: 0, Speed: 1000, Width: 200, MaxLength: 500, Range: 1000);
         var casterPos = new Point2D(0, 0);
-        var aimPos = new Point2D(500, 0);
-        var targetPos = new Point2D(300, 50); // Within vector rectangle
+        // The beam starts at the aim position; aiming at the target hits it
+        // as soon as the beam activates
+        var aimPos = new Point2D(300, 50);
+        var targetPos = new Point2D(300, 50);
 
-        var result = engine.ValidateHit(skillshot, casterPos, aimPos, targetPos, hitboxRadius: 50, timeElapsed: 0.5);
+        var result = engine.ValidateHit(skillshot, casterPos, aimPos, targetPos, hitboxRadius: 50, timeElapsed: 0.05);
 
         Assert.True(result);
+    }
+
+    [Fact]
+    public void PredictFromState_CircularSkillshotVsPathingTarget_ReturnsHit()
+    {
+        var engine = new PredictionEngine();
+        var luxE = new Skillshot.Circular(Delay: 0.25f, Speed: 1200, Radius: 350, Range: 1100);
+        var pathing = new MovementState.Pathing(
+            Waypoints: new[] { new Point2D(400, -300), new Point2D(400, 100), new Point2D(800, 100) },
+            Speed: 350,
+            CurrentIndex: 1,
+            ProgressOnSegment: 0);
+
+        var result = engine.PredictFromState(luxE, new Point2D(0, 0), pathing, hitboxRadius: 65);
+
+        Assert.IsType<PredictionResult.Hit>(result);
+    }
+
+    [Fact]
+    public void PredictFromState_ConeSkillshotVsPathingTarget_ReturnsHit()
+    {
+        var engine = new PredictionEngine();
+        var annieW = new Skillshot.Cone(Delay: 0.25f, Angle: 50, Range: 600);
+        var pathing = new MovementState.Pathing(
+            Waypoints: new[] { new Point2D(300, 0), new Point2D(400, 100) },
+            Speed: 350,
+            CurrentIndex: 1,
+            ProgressOnSegment: 0);
+
+        var result = engine.PredictFromState(annieW, new Point2D(0, 0), pathing, hitboxRadius: 65);
+
+        Assert.IsType<PredictionResult.Hit>(result);
+    }
+
+    [Fact]
+    public void PredictFromState_CircularVsStationaryTarget_CentersDetonationOnTarget()
+    {
+        var engine = new PredictionEngine();
+        var luxE = new Skillshot.Circular(Delay: 0.25f, Speed: 1200, Radius: 350, Range: 1100);
+        var idle = new MovementState.Idle(new Point2D(800, 0));
+
+        var result = engine.PredictFromState(luxE, new Point2D(0, 0), idle, hitboxRadius: 65);
+
+        var hit = Assert.IsType<PredictionResult.Hit>(result);
+
+        // The detonation must be centered on the target for maximum margin,
+        // not pulled Radius + hitbox units toward the caster (grazing edge)
+        Assert.True(
+            hit.CastPosition.DistanceTo(hit.PredictedPosition) < 1.0,
+            $"Cast position {hit.CastPosition} should be centered on predicted position {hit.PredictedPosition}");
+    }
+
+    [Fact]
+    public void PredictFromState_CircularVsPathingTarget_CentersDetonationOnPredictedPosition()
+    {
+        var engine = new PredictionEngine();
+        var luxE = new Skillshot.Circular(Delay: 0.25f, Speed: 1200, Radius: 350, Range: 1100);
+        var pathing = new MovementState.Pathing(
+            Waypoints: new[] { new Point2D(400, -300), new Point2D(400, 100), new Point2D(800, 100) },
+            Speed: 350,
+            CurrentIndex: 1,
+            ProgressOnSegment: 0);
+
+        var result = engine.PredictFromState(luxE, new Point2D(0, 0), pathing, hitboxRadius: 65);
+
+        var hit = Assert.IsType<PredictionResult.Hit>(result);
+        Assert.True(
+            hit.CastPosition.DistanceTo(hit.PredictedPosition) < 1.0,
+            $"Cast position {hit.CastPosition} should be centered on predicted position {hit.PredictedPosition}");
+    }
+
+    [Fact]
+    public void PredictFromState_PathingTargetThatFinishedItsPath_ReturnsHit()
+    {
+        var engine = new PredictionEngine();
+        var skillshot = new Skillshot.Linear(Delay: 0.25f, Speed: 2000, Width: 60, Range: 1150);
+        var casterPos = new Point2D(0, 0);
+
+        // CurrentIndex == Waypoints.Count means the target completed the path
+        // and is now standing at the final waypoint - an easy stationary hit.
+        var finishedPath = new MovementState.Pathing(
+            Waypoints: new[] { new Point2D(100, 0), new Point2D(500, 0) },
+            Speed: 350,
+            CurrentIndex: 2,
+            ProgressOnSegment: 0);
+
+        var result = engine.PredictFromState(skillshot, casterPos, finishedPath, hitboxRadius: 65);
+
+        Assert.IsType<PredictionResult.Hit>(result);
     }
 
     [Fact]

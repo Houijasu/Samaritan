@@ -30,7 +30,7 @@ public class EntityRenderer
     private static readonly Color HandleActiveColor = new(255, 200, 50);
     private static readonly Color DirectionHandleColor = new(100, 255, 100);
 
-    public EntityRenderer(GraphicsDevice device, float scale, Vector2 offset)
+    public EntityRenderer(GraphicsDevice device, float scale)
     {
         _device = device;
         _scale = scale;

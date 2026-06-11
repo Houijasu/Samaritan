@@ -41,12 +41,14 @@ public interface IPredictionEngine
     /// <param name="casterPosition">Position of the caster.</param>
     /// <param name="targetState">Target's current movement state.</param>
     /// <param name="hitboxRadius">Target's hitbox radius.</param>
+    /// <param name="aimMode">How projectile skillshots are aimed against moving targets.</param>
     /// <returns>Prediction result.</returns>
     PredictionResult PredictFromState(
         Skillshot skillshot,
         Point2D casterPosition,
         MovementState targetState,
-        double hitboxRadius);
+        double hitboxRadius,
+        ProjectileAimMode aimMode = ProjectileAimMode.RearGraze);
 
     /// <summary>
     /// Validates whether a skillshot aimed at a position will hit a target.

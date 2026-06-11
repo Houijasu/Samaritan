@@ -1,7 +1,5 @@
 namespace Samaritan.Prediction.Engine;
 
-using System.Diagnostics;
-
 using MathNet.Numerics;
 using MathNet.Spatial.Euclidean;
 
@@ -17,6 +15,16 @@ using Samaritan.Prediction.Solvers;
 /// </summary>
 public sealed class PredictionEngine : IPredictionEngine
 {
+    // How deep inside the hitbox rim the planned closest approach sits, as the
+    // kept fraction of the effective radius (1.0 would be an exact tangent)
+    private const double RearGrazeMargin = 0.95; // robust default - ~5% penetration
+
+    // NearestRear: target a closest approach of R*(1 - epsilon) in the sim frame
+    // (~0.25 units for R = 100), accepting up to this many extra units of depth
+    // from the bisection tolerance
+    private const double TangentGrazeEpsilon = 0.0025;
+    private const double TangentGapToleranceUnits = 0.1;
+
     private PredictionConfig _config;
     private readonly IInterceptionSolver _solver;
     private readonly PredictionCache? _cache;
@@ -108,24 +116,23 @@ public sealed class PredictionEngine : IPredictionEngine
         Skillshot skillshot,
         Point2D casterPosition,
         MovementState targetState,
-        double hitboxRadius)
+        double hitboxRadius,
+        ProjectileAimMode aimMode = ProjectileAimMode.RearGraze)
     {
-        var sw = Stopwatch.StartNew();
-
         // Check cache
-        var cacheKey = CreateCacheKey(skillshot, casterPosition, targetState);
+        var cacheKey = $"{CreateCacheKey(skillshot, casterPosition, targetState, hitboxRadius)}:{(int)aimMode}";
         if (_cache?.TryGet(cacheKey, out var cachedResult) == true)
         {
             return cachedResult;
         }
 
         // Get skillshot parameters
-        var (baseDelay, range) = GetSkillshotParams(skillshot);
-        var skillshotSpeed = GetSkillshotSpeed(skillshot);
+        var range = skillshot.GetMaxRange();
+        var projectileSpeed = skillshot.GetProjectileSpeed();
 
         // Add network compensation: ping + tick uncertainty + reaction buffer
         // This accounts for the time between seeing the target and the server processing your cast
-        var effectiveDelay = baseDelay + _config.NetworkCompensationDelay;
+        var effectiveDelay = skillshot.GetDelay() + _config.NetworkCompensationDelay;
 
         // Check basic range first
         var targetPosition = targetState.GetPosition();
@@ -139,38 +146,73 @@ public sealed class PredictionEngine : IPredictionEngine
         // Get target movement info
         var targetVelocity = targetState.GetVelocity();
         var targetSpeed = targetVelocity.Length;
-        var effectiveRadius = GetEffectiveRadius(skillshot, hitboxRadius);
+        var effectiveRadius = skillshot.GetEffectiveRadius(hitboxRadius);
 
         PredictionResult result;
 
-        // For waypoint paths, use the specialized solver (handles direction changes)
-        if (targetState is MovementState.Pathing pathing)
+        // For waypoint paths with remaining segments, use the specialized solver
+        // (handles direction changes). A finished path falls through to the
+        // standard solvers, which treat the target as stationary at the last waypoint.
+        if (targetState is MovementState.Pathing pathing && pathing.GetPathSegments().Any())
         {
             result = SolveWaypointInterception(
                 skillshot, casterPosition, pathing, effectiveRadius, effectiveDelay, range);
         }
-        // For traveling projectiles with moving targets, solve trailing edge interception directly
-        else if (targetSpeed > 1.0 && skillshotSpeed < 10000)
+        // For traveling projectiles with moving targets, solve interception directly
+        else if (targetSpeed > 1.0 && projectileSpeed is double movingSolverSpeed)
         {
-            // Use full effectiveRadius - the new equation handles edge-to-edge collision properly
-            var trailingEdgeResult = SolveTrailingEdgeInterception(
-                casterPosition, targetPosition, targetVelocity, effectiveRadius,
-                skillshotSpeed, effectiveDelay, range);
+            // Placed effects detonate where aimed, so they intercept the target center.
+            // Projectiles aim BEHIND the target: rear-edge graze (RearGraze), most
+            // tangent graze (NearestRear), or earliest rear-side contact (Optimal).
+            var movingResult = IsPlacedEffect(skillshot)
+                ? SolveCenteredInterception(
+                    casterPosition, targetPosition, targetVelocity, effectiveRadius,
+                    movingSolverSpeed, effectiveDelay)
+                : aimMode switch
+                {
+                    ProjectileAimMode.NearestRear =>
+                        SolveTangentRearInterception(
+                            casterPosition, targetPosition, targetVelocity, effectiveRadius,
+                            movingSolverSpeed, effectiveDelay, _config.NetworkCompensationDelay, range)
+                        ?? SolveTrailingEdgeInterception(
+                            casterPosition, targetPosition, targetVelocity, effectiveRadius,
+                            movingSolverSpeed, effectiveDelay, RearGrazeMargin, 0),
+                    ProjectileAimMode.Optimal =>
+                        SolveOptimalRearInterception(
+                            casterPosition, targetPosition, targetVelocity, effectiveRadius,
+                            movingSolverSpeed, effectiveDelay, _config.NetworkCompensationDelay, range,
+                            hitboxRadius)
+                        ?? SolveTrailingEdgeInterception(
+                            casterPosition, targetPosition, targetVelocity, effectiveRadius,
+                            movingSolverSpeed, effectiveDelay, RearGrazeMargin, 0),
+                    _ => SolveTrailingEdgeInterception(
+                        casterPosition, targetPosition, targetVelocity, effectiveRadius,
+                        movingSolverSpeed, effectiveDelay, RearGrazeMargin, 0)
+                };
 
-            if (trailingEdgeResult.HasValue)
+            if (movingResult.HasValue)
             {
-                var (interceptionTime, castPosition) = trailingEdgeResult.Value;
-                var predictedPosition = targetState.PredictPosition(interceptionTime);
+                var (interceptionTime, castPosition) = movingResult.Value;
+                var aimDistance = casterPosition.DistanceTo(castPosition);
 
-                result = new PredictionResult.Hit(
-                    interceptionTime,
-                    castPosition,
-                    predictedPosition,
-                    ComputeConfidence(casterPosition, castPosition, targetSpeed, skillshotSpeed));
+                if (aimDistance > range)
+                {
+                    result = new PredictionResult.OutOfRange(aimDistance, range);
+                }
+                else
+                {
+                    var predictedPosition = targetState.PredictPosition(interceptionTime);
+
+                    result = new PredictionResult.Hit(
+                        interceptionTime,
+                        castPosition,
+                        predictedPosition,
+                        ComputeConfidence(casterPosition, castPosition, targetSpeed, movingSolverSpeed));
+                }
             }
             else
             {
-                result = new PredictionResult.Unreachable("No valid trailing edge interception found");
+                result = new PredictionResult.Unreachable("No valid interception found for moving target");
             }
         }
         else
@@ -195,9 +237,10 @@ public sealed class PredictionEngine : IPredictionEngine
                 }
                 else
                 {
-                    // For stationary targets, aim at near edge
-                    var castPosition = ComputeStaticAimPoint(
-                        casterPosition, predictedPosition, effectiveRadius);
+                    // Placed effects center on the target; projectiles aim at the near edge
+                    var castPosition = IsPlacedEffect(skillshot)
+                        ? predictedPosition
+                        : ComputeStaticAimPoint(casterPosition, predictedPosition, effectiveRadius);
 
                     result = new PredictionResult.Hit(
                         adjustedTime,
@@ -208,8 +251,6 @@ public sealed class PredictionEngine : IPredictionEngine
             }
         }
 
-        sw.Stop();
-
         // Cache result
         _cache?.Set(cacheKey, result);
 
@@ -217,8 +258,8 @@ public sealed class PredictionEngine : IPredictionEngine
     }
 
     /// <summary>
-    /// Solves interception for targets following waypoint paths.
-    /// Cuts the path by (delay * targetSpeed - hitbox), then solves using quadratic formula.
+    /// Solves interception for targets following waypoint paths by delegating to
+    /// the shared segment-by-segment algorithm in <see cref="WaypointInterceptionSolver"/>.
     /// </summary>
     private static PredictionResult SolveWaypointInterception(
         Skillshot skillshot,
@@ -228,227 +269,632 @@ public sealed class PredictionEngine : IPredictionEngine
         double effectiveDelay,
         double range)
     {
-        var projectileSpeed = GetSkillshotSpeed(skillshot);
         var segments = pathing.GetPathSegments().ToList();
 
         if (segments.Count == 0)
             return new PredictionResult.Unreachable("No path segments");
 
-        var targetSpeed = segments[0].Velocity.Length;
-
-        // Cut path by (delay * speed - hitbox) to account for:
-        // 1. Where target will be when projectile fires (delay * speed)
-        // 2. Hitting the near edge of hitbox (-hitbox)
-        var cutLength = effectiveDelay * targetSpeed - effectiveRadius;
-        var cutSegments = CutPath(segments, cutLength);
-
-        if (cutSegments.Count == 0)
-            return new PredictionResult.Unreachable("Path cut resulted in empty path");
-
-        // Quadratic formula (hitbox handled via path cutting)
-        // a = v² - p², b = 2(diff·v - p²·tTotal), c = diff² - p²·tTotal²
-        var sqrSpeed = projectileSpeed * projectileSpeed;
-        double tTotal = 0;
-        const double Epsilon = 1e-4;
-
-        foreach (var segment in cutSegments)
+        // Instant skillshots (cones, zero-speed AoE) apply at the end of the delay -
+        // aim at the position the target reaches by then
+        if (skillshot.GetProjectileSpeed() is not double projectileSpeed)
         {
-            var diff = segment.Start - casterPosition;
-            var velocity = segment.Velocity;
-            var duration = segment.Duration;
+            var instantPosition = pathing.PredictPosition(effectiveDelay);
+            var instantDistance = casterPosition.DistanceTo(instantPosition);
 
-            // Quadratic coefficients
-            var a = velocity.DotProduct(velocity) - sqrSpeed;
-            var b = 2.0 * (diff.DotProduct(velocity) - sqrSpeed * tTotal);
-            var c = diff.DotProduct(diff) - sqrSpeed * tTotal * tTotal;
+            if (instantDistance > range)
+                return new PredictionResult.OutOfRange(instantDistance, range);
 
-            // Use FindRoots.Quadratic for robust numerical handling
-            var (root1, root2) = FindRoots.Quadratic(c, b, a);
-
-            const double ImagTol = 1e-9;
-            var tIntercept = double.MaxValue;
-
-            if (Math.Abs(root1.Imaginary) < ImagTol && root1.Real >= 0 && root1.Real <= duration + Epsilon)
-                tIntercept = Math.Min(tIntercept, root1.Real);
-            if (Math.Abs(root2.Imaginary) < ImagTol && root2.Real >= 0 && root2.Real <= duration + Epsilon)
-                tIntercept = Math.Min(tIntercept, root2.Real);
-
-            if (tIntercept < double.MaxValue)
-            {
-                // Aim point is simply position on the cut path at interception time
-                var aimPoint = segment.Start + velocity.ScaleBy(tIntercept);
-
-                if (casterPosition.DistanceTo(aimPoint) <= range)
-                {
-                    var totalTime = effectiveDelay + tTotal + tIntercept;
-                    var predictedPosition = pathing.PredictPosition(totalTime);
-
-                    return new PredictionResult.Hit(
-                        totalTime,
-                        aimPoint,
-                        predictedPosition,
-                        ComputeConfidence(casterPosition, aimPoint, pathing.Speed, projectileSpeed));
-                }
-            }
-
-            tTotal += duration;
+            return new PredictionResult.Hit(
+                effectiveDelay,
+                instantPosition,
+                instantPosition,
+                ComputeConfidence(casterPosition, instantPosition, pathing.Speed, double.PositiveInfinity));
         }
 
-        return new PredictionResult.Unreachable("No valid interception found on path");
+        var solution = WaypointInterceptionSolver.SolveOnPath(
+            casterPosition, segments, effectiveDelay, projectileSpeed, range, effectiveRadius);
+
+        if (solution is null)
+            return new PredictionResult.Unreachable("No valid interception found on path");
+
+        var (totalTime, pathAimPoint) = solution.Value;
+        var predictedPosition = pathing.PredictPosition(totalTime);
+
+        // Placed area effects detonate where aimed - center them on the predicted
+        // position for maximum margin; projectiles keep the trailing-edge aim point
+        var aimPoint = IsPlacedEffect(skillshot) && casterPosition.DistanceTo(predictedPosition) <= range
+            ? predictedPosition
+            : pathAimPoint;
+
+        return new PredictionResult.Hit(
+            totalTime,
+            aimPoint,
+            predictedPosition,
+            ComputeConfidence(casterPosition, aimPoint, pathing.Speed, projectileSpeed));
     }
 
     /// <summary>
-    /// Cuts a path by the specified distance.
-    /// Positive distance advances along the path, negative distance extends backwards.
+    /// Placed effects land at the aim position itself (rather than sweeping a line
+    /// from the caster), so they should be centered on the target.
     /// </summary>
-    private static List<PathSegment> CutPath(List<PathSegment> segments, double distance)
+    private static bool IsPlacedEffect(Skillshot skillshot) =>
+        skillshot is Skillshot.Circular or Skillshot.Rectangle or Skillshot.VectorRectangle;
+
+    /// <summary>
+    /// Solves interception of the target center for a target moving in a straight
+    /// line. Finds the earliest time T >= castDelay at which a projectile launched
+    /// after castDelay comes within effectiveRadius of the target center:
+    ///   |D + V*T| = speed * (T - delay) + R
+    /// which expands to aT² + bT + c = 0 with k = speed*delay - R:
+    ///   a = |V|² - speed², b = 2(D·V + speed*k), c = |D|² - k²
+    /// Used for placed effects, which detonate where they are aimed.
+    /// </summary>
+    private static (double Time, Point2D AimPoint)? SolveCenteredInterception(
+        Point2D casterPosition,
+        Point2D targetPosition,
+        Vector2D targetVelocity,
+        double effectiveRadius,
+        double projectileSpeed,
+        double castDelay)
     {
-        var result = new List<PathSegment>();
+        // Target already inside the effective radius when the projectile launches
+        var positionAtLaunch = targetPosition + targetVelocity.ScaleBy(castDelay);
+        if (casterPosition.DistanceTo(positionAtLaunch) <= effectiveRadius)
+            return (castDelay, positionAtLaunch);
 
-        if (segments.Count == 0)
-            return result;
+        var displacement = targetPosition - casterPosition;
+        var launchOffset = projectileSpeed * castDelay - effectiveRadius;
 
-        if (distance < 0)
-        {
-            // Extend backwards
-            var first = segments[0];
-            var extendedStart = first.Start + first.Direction.ScaleBy(distance);
-            var newStartTime = first.StartTime + distance / first.Speed;
-            var newFirst = new PathSegment(extendedStart, first.End, newStartTime, first.EndTime, first.Speed);
-            result.Add(newFirst);
+        var quadA = targetVelocity.DotProduct(targetVelocity) - projectileSpeed * projectileSpeed;
+        var quadB = 2.0 * (displacement.DotProduct(targetVelocity) + projectileSpeed * launchOffset);
+        var quadC = displacement.DotProduct(displacement) - launchOffset * launchOffset;
 
-            for (var i = 1; i < segments.Count; i++)
-                result.Add(segments[i]);
+        var interceptTime = MinRootAtOrAfter(quadA, quadB, quadC, castDelay);
+        if (interceptTime is not double time)
+            return null;
 
-            return result;
-        }
+        var aimPoint = targetPosition + targetVelocity.ScaleBy(time);
 
-        // Advance along path
-        var remaining = distance;
-        for (var i = 0; i < segments.Count; i++)
-        {
-            var seg = segments[i];
-            var segLength = seg.Length;
-
-            if (remaining < segLength)
-            {
-                var newStart = seg.Start + seg.Direction.ScaleBy(remaining);
-                var newStartTime = seg.StartTime + remaining / seg.Speed;
-                var newSegment = new PathSegment(newStart, seg.End, newStartTime, seg.EndTime, seg.Speed);
-                result.Add(newSegment);
-
-                for (var j = i + 1; j < segments.Count; j++)
-                    result.Add(segments[j]);
-
-                return result;
-            }
-
-            remaining -= segLength;
-        }
-
-        // Distance exceeds path - return last point as zero-length segment
-        var last = segments[^1];
-        result.Add(new PathSegment(last.End, last.End, last.EndTime, last.EndTime, last.Speed));
-        return result;
+        return (time, aimPoint);
     }
 
     /// <summary>
-    /// Solves the interception problem for a moving target traveling in a straight line.
-    /// Applies angle-dependent trailing edge correction for accurate hitbox handling.
+    /// Solves interception aiming at the rear edge of the target's hitbox.
+    /// The aim point trails the predicted center along the movement direction by a
+    /// lead L chosen so the missile front grazes the REAR of the hitbox instead of
+    /// clipping the caster-side flank on the way in. The graze condition follows
+    /// from the relative motion of front and center near arrival:
+    ///   gap²(τ) = relSq·τ² - 2L(v - p·cosφ)τ + L²,  relSq = p² + v² - 2pv·cosφ
+    /// (τ = time before arrival, φ = angle between path and missile ray), whose
+    /// minimum equals R when L = R·√relSq / (p·sinφ). The grazeMargin sets how
+    /// deep inside the edge the closest approach is planned, and leadCompensation
+    /// lengthens the lead to cancel the launch skew between the prediction frame
+    /// and the actual cast. The reported time is the FIRST contact (largest τ
+    /// with gap = R), so predicted and actual hit times agree.
     /// </summary>
     private static (double Time, Point2D AimPoint)? SolveTrailingEdgeInterception(
         Point2D casterPosition,
         Point2D targetPosition,
         Vector2D targetVelocity,
-        double hitbox,
+        double effectiveRadius,
         double projectileSpeed,
         double castDelay,
-        double maxRange)
+        double grazeMargin,
+        double leadCompensation)
     {
+        const int LeadRefinements = 5;             // lead depends on the ray, which depends on the lead
+        const double MaxLeadFactor = 2.0;          // cap rear-aim on near-head-on approaches
+        const double LeadConvergenceTolerance = 0.05; // must stay well below the planned graze margin
+
+        // Target's hitbox already covers the launch point - immediate hit
+        var centerAtLaunch = targetPosition + targetVelocity.ScaleBy(castDelay);
+        if (casterPosition.DistanceTo(centerAtLaunch) <= effectiveRadius)
+            return (castDelay, centerAtLaunch);
+
         var targetSpeed = targetVelocity.Length;
+        var pathDirection = targetVelocity.Normalize();
+        var speedSq = projectileSpeed * projectileSpeed;
+        var launchDistance = projectileSpeed * castDelay;
 
-        // Stationary target - aim at near edge
-        if (targetSpeed < 1.0)
+        var lead = effectiveRadius + leadCompensation;
+        double arrivalTime = 0;
+        Point2D aimPoint = default;
+
+        for (var iteration = 0; iteration <= LeadRefinements; iteration++)
         {
-            var toTarget = targetPosition - casterPosition;
-            var distance = toTarget.Length;
+            // Missile arrival at the lead point: |D - L*v̂ + V*T| = p*(T - d)
+            //   a = |V|² - p², b = 2(D'·V + p²·d), c = |D'|² - (p·d)²
+            var displacement = targetPosition - casterPosition - pathDirection.ScaleBy(lead);
+            var quadA = targetVelocity.DotProduct(targetVelocity) - speedSq;
+            var quadB = 2.0 * (displacement.DotProduct(targetVelocity) + projectileSpeed * launchDistance);
+            var quadC = displacement.DotProduct(displacement) - launchDistance * launchDistance;
 
-            if (distance <= hitbox)
-                return (castDelay, targetPosition);
-
-            var flightTime = (distance - hitbox) / projectileSpeed;
-            var nearEdge = targetPosition - toTarget.Normalize().ScaleBy(hitbox);
-
-            if (casterPosition.DistanceTo(nearEdge) > maxRange)
+            if (MinRootAtOrAfter(quadA, quadB, quadC, castDelay) is not double time)
                 return null;
 
-            return (castDelay + flightTime, nearEdge);
+            arrivalTime = time;
+            aimPoint = targetPosition - pathDirection.ScaleBy(lead) + targetVelocity.ScaleBy(time);
+
+            if (iteration == LeadRefinements)
+                break;
+
+            var newLead = RearGrazeLead(
+                casterPosition, aimPoint, pathDirection, targetSpeed, projectileSpeed, effectiveRadius);
+            newLead = Math.Min(newLead * grazeMargin, MaxLeadFactor * effectiveRadius) + leadCompensation;
+
+            if (Math.Abs(newLead - lead) < LeadConvergenceTolerance)
+                break;
+
+            lead = newLead;
         }
 
-        // Cut path by (delay * speed - hitbox) to get trailing edge start position
-        var cutDistance = castDelay * targetSpeed - hitbox;
-        var targetDirection = targetVelocity.Normalize();
-        var trailingEdgeStart = targetPosition + targetDirection.ScaleBy(cutDistance);
+        // First contact: largest τ (earliest time) with gap(τ) = R
+        var contactOffset = FirstContactOffset(
+            casterPosition, aimPoint, pathDirection, targetSpeed, projectileSpeed, effectiveRadius, lead);
+        var contactTime = Math.Max(castDelay, arrivalTime - contactOffset);
 
-        // Vector from caster to trailing edge start
-        var toTrailingEdge = trailingEdgeStart - casterPosition;
-        var distanceToTrailingEdge = toTrailingEdge.Length;
-        var projectileSpeedSqr = projectileSpeed * projectileSpeed;
+        return (contactTime, aimPoint);
+    }
 
-        // Angle between caster-to-target and target velocity
-        var cosAngle = distanceToTrailingEdge > 1e-9
-            ? toTrailingEdge.DotProduct(targetVelocity) / (distanceToTrailingEdge * targetSpeed)
-            : 1.0;
-        var sinAngle = Math.Sqrt(Math.Max(0, 1.0 - cosAngle * cosAngle));
+    /// <summary>
+    /// The lead for which the missile front tangentially grazes the rear edge of
+    /// the hitbox: L = R·√(p² + v² - 2pv·cosφ) / (p·sinφ). Falls back to the
+    /// effective radius for chase or near-parallel geometries, where the front
+    /// overtakes the hitbox from directly behind and the base lead already
+    /// contacts the rear edge at arrival.
+    /// </summary>
+    private static double RearGrazeLead(
+        Point2D casterPosition,
+        Point2D aimPoint,
+        Vector2D pathDirection,
+        double targetSpeed,
+        double projectileSpeed,
+        double effectiveRadius)
+    {
+        var toAim = aimPoint - casterPosition;
+        if (toAim.Length < 1e-6)
+            return effectiveRadius;
 
-        // Trailing edge correction factors
-        var speedDifference = projectileSpeed - targetSpeed;
-        var delayDistance = targetSpeed * castDelay;
-        var extendedHitbox = hitbox + delayDistance;
-        var baseCorrection = speedDifference * extendedHitbox;
+        var rayDirection = toAim.Normalize();
+        var cosPhi = pathDirection.DotProduct(rayDirection);
+        var sinPhiSq = Math.Max(0, 1 - cosPhi * cosPhi);
 
-        // Physically-derived correction multiplier using dimensionless ratios
-        // M = sinθ × (1 + catchUpFactor × hitboxRatio / angleDivisor)
-        var hitboxRatio = hitbox / extendedHitbox;
-        var speedRatio = targetSpeed / projectileSpeed;
-        var catchUpFactor = 1 - speedRatio;
-        var angleDivisor = 2 - hitboxRatio - cosAngle / hitboxRatio;
+        // Chase geometry (closest approach is at/after arrival) or near-parallel ray
+        if (targetSpeed - projectileSpeed * cosPhi <= 0 || sinPhiSq < 0.0025)
+            return effectiveRadius;
 
-        // Guard against division by zero (e.g. when hitboxRatio ~ 1 and cosAngle ~ 1)
-        var correctionMultiplier = 0.0;
-        if (Math.Abs(angleDivisor) > 1e-9)
+        var relativeSpeedSq = projectileSpeed * projectileSpeed + targetSpeed * targetSpeed
+                            - 2 * projectileSpeed * targetSpeed * cosPhi;
+
+        return effectiveRadius * Math.Sqrt(relativeSpeedSq) / (projectileSpeed * Math.Sqrt(sinPhiSq));
+    }
+
+    /// <summary>
+    /// Time between first contact (front-to-center gap reaching the effective
+    /// radius) and arrival at the aim point: the largest root of
+    /// relSq·τ² - 2L(v - p·cosφ)τ + (L² - R²) = 0. Zero when contact happens at
+    /// arrival itself (chase geometries).
+    /// </summary>
+    private static double FirstContactOffset(
+        Point2D casterPosition,
+        Point2D aimPoint,
+        Vector2D pathDirection,
+        double targetSpeed,
+        double projectileSpeed,
+        double effectiveRadius,
+        double lead)
+    {
+        var toAim = aimPoint - casterPosition;
+        if (toAim.Length < 1e-6)
+            return 0;
+
+        var rayDirection = toAim.Normalize();
+        var cosPhi = pathDirection.DotProduct(rayDirection);
+        var relativeSpeedSq = projectileSpeed * projectileSpeed + targetSpeed * targetSpeed
+                            - 2 * projectileSpeed * targetSpeed * cosPhi;
+
+        if (relativeSpeedSq < 1e-9)
+            return 0;
+
+        var halfB = lead * (targetSpeed - projectileSpeed * cosPhi);
+        var discriminant = halfB * halfB - relativeSpeedSq * (lead * lead - effectiveRadius * effectiveRadius);
+
+        if (discriminant < 0)
+            return 0;
+
+        return Math.Max(0, (halfB + Math.Sqrt(discriminant)) / relativeSpeedSq);
+    }
+
+    /// <summary>
+    /// Solves the most tangent rear graze by searching over the missile RAY ANGLE
+    /// directly (for a linear skillshot only the direction matters). In the sim
+    /// frame (raw delay d = effectiveDelay - netComp) the center-minus-front
+    /// offset is affine in flight time s: g(s) = G0 + W·s with
+    /// G0 = (P - C) + V·d and W = V - p·r̂(θ), so the closest approach over the
+    /// range-clamped flight is a closed form. Bisection finds the ray whose
+    /// closest approach equals R·(1 - epsilon), rotating from a guaranteed-deep
+    /// inner ray (through the classical R = 0 interception point, minGap = 0)
+    /// toward the REAR side of the hit arc. Returns null when no in-range
+    /// tangent ray exists (caller falls back to the rear-graze solve).
+    /// </summary>
+    private static (double Time, Point2D AimPoint)? SolveTangentRearInterception(
+        Point2D casterPosition,
+        Point2D targetPosition,
+        Vector2D targetVelocity,
+        double effectiveRadius,
+        double projectileSpeed,
+        double effectiveDelay,
+        double networkCompensation,
+        double range)
+    {
+        var rawDelay = Math.Max(0, effectiveDelay - networkCompensation);
+        var launchOffset = (targetPosition - casterPosition) + targetVelocity.ScaleBy(rawDelay);
+        var maxFlight = range / projectileSpeed;
+
+        // Target's hitbox already covers the launch point - immediate hit
+        if (launchOffset.Length <= effectiveRadius)
+            return (effectiveDelay, targetPosition + targetVelocity.ScaleBy(effectiveDelay));
+
+        var targetGap = effectiveRadius * (1 - TangentGrazeEpsilon);
+
+        double GapAt(Vector2D ray) => ClampedRayMinGap(
+            launchOffset, targetVelocity - ray.ScaleBy(projectileSpeed), maxFlight);
+
+        if (FindDeepInnerRay(
+                launchOffset, targetPosition - casterPosition, targetVelocity,
+                projectileSpeed, rawDelay, targetGap, GapAt) is not Vector2D innerRayValue)
         {
-            correctionMultiplier = sinAngle * (1 + catchUpFactor * hitboxRatio / angleDivisor);
+            return null;
         }
 
-        // Quadratic coefficients: at² + bt + c = 0
-        var quadA = targetVelocity.DotProduct(targetVelocity) - projectileSpeedSqr;
-        var quadB = 2.0 * (toTrailingEdge.DotProduct(targetVelocity) - baseCorrection * correctionMultiplier);
-        var quadC = toTrailingEdge.DotProduct(toTrailingEdge);
+        var innerRay = (Vector2D?)innerRayValue;
 
-        // Solve quadratic using robust numerical method
+        // Rotating in this direction exits the hit arc through its REAR boundary
+        var pathDirection = targetVelocity.Normalize();
+        var cross = innerRay.Value.X * pathDirection.Y - innerRay.Value.Y * pathDirection.X;
+        var rotationSign = Math.Abs(cross) < 1e-9 ? 1.0 : -Math.Sign(cross);
+
+        for (var attempt = 0; attempt < 2; attempt++, rotationSign = -rotationSign)
+        {
+            if (BisectTangentRay(innerRay.Value, rotationSign, targetGap, GapAt) is not Vector2D tangentRay)
+                continue;
+
+            // First contact in the sim frame defines the cast position (rear rim)
+            var relativeVelocity = targetVelocity - tangentRay.ScaleBy(projectileSpeed);
+            var contactFlight = MinRootAtOrAfter(
+                relativeVelocity.DotProduct(relativeVelocity),
+                2.0 * launchOffset.DotProduct(relativeVelocity),
+                launchOffset.DotProduct(launchOffset) - effectiveRadius * effectiveRadius,
+                0);
+            if (contactFlight is not double flight)
+                continue;
+
+            // Safety: the contact must not sit on the leading side of the hitbox.
+            // Broadside (~0) is legal for head-on and chase geometries.
+            var contactPoint = casterPosition + tangentRay.ScaleBy(projectileSpeed * flight);
+            var centerAtContact = casterPosition + launchOffset + targetVelocity.ScaleBy(flight);
+            var rearDot = (contactPoint - centerAtContact).DotProduct(targetVelocity);
+            if (rearDot > 0.3 * effectiveRadius * targetVelocity.Length)
+                continue;
+
+            var castPosition = casterPosition + tangentRay.ScaleBy(Math.Max(1.0, projectileSpeed * flight));
+            var time = PredictionFrameContactTime(
+                casterPosition, targetPosition, targetVelocity, effectiveRadius,
+                projectileSpeed, effectiveDelay, tangentRay, maxFlight);
+
+            return (time, castPosition);
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Solves the earliest rear-side contact: among all rays whose pass lands on
+    /// the rear half of the hitbox AND penetrates no deeper than the target's
+    /// bounding radius (the "HIT by" depth stays below hitboxRadius), finds the
+    /// one with the smallest first-contact time (sim frame), and casts at the
+    /// contact point itself - the closest cast position to the target. Sweeps
+    /// the hit arc (bounded by the two near-tangent rays) coarsely, then refines
+    /// around the best sample. Returns null when no valid ray exists.
+    /// </summary>
+    private static (double Time, Point2D AimPoint)? SolveOptimalRearInterception(
+        Point2D casterPosition,
+        Point2D targetPosition,
+        Vector2D targetVelocity,
+        double effectiveRadius,
+        double projectileSpeed,
+        double effectiveDelay,
+        double networkCompensation,
+        double range,
+        double hitboxRadius)
+    {
+        var rawDelay = Math.Max(0, effectiveDelay - networkCompensation);
+        var launchOffset = (targetPosition - casterPosition) + targetVelocity.ScaleBy(rawDelay);
+        var maxFlight = range / projectileSpeed;
+
+        // Target's hitbox already covers the launch point - immediate hit
+        if (launchOffset.Length <= effectiveRadius)
+            return (effectiveDelay, targetPosition + targetVelocity.ScaleBy(effectiveDelay));
+
+        var targetGap = effectiveRadius * (1 - TangentGrazeEpsilon);
+
+        double GapAt(Vector2D ray) => ClampedRayMinGap(
+            launchOffset, targetVelocity - ray.ScaleBy(projectileSpeed), maxFlight);
+
+        if (FindDeepInnerRay(
+                launchOffset, targetPosition - casterPosition, targetVelocity,
+                projectileSpeed, rawDelay, targetGap, GapAt) is not Vector2D innerRay)
+        {
+            return null;
+        }
+
+        // Hit-arc endpoints: the near-tangent rays on both rotation sides
+        if (BisectTangentRay(innerRay, 1.0, targetGap, GapAt) is not Vector2D positiveEnd ||
+            BisectTangentRay(innerRay, -1.0, targetGap, GapAt) is not Vector2D negativeEnd)
+        {
+            return null;
+        }
+
+        var positiveAngle = SignedAngle(innerRay, positiveEnd);
+        var negativeAngle = SignedAngle(innerRay, negativeEnd);
+
+        double? FlightAt(Vector2D ray)
+        {
+            var relativeVelocity = targetVelocity - ray.ScaleBy(projectileSpeed);
+            var flight = MinRootAtOrAfter(
+                relativeVelocity.DotProduct(relativeVelocity),
+                2.0 * launchOffset.DotProduct(relativeVelocity),
+                launchOffset.DotProduct(launchOffset) - effectiveRadius * effectiveRadius,
+                0);
+
+            return flight is double f && f <= maxFlight ? f : null;
+        }
+
+        // Rear half of the hitbox, with a broadside tolerance. Evaluated at the
+        // deepest point of the pass (closest approach), not the first touch: a
+        // head-on target is always touched on its leading face first, and even
+        // its closest approach sits a few units on the caster side - 5% of R
+        // accepts those while still rejecting genuinely frontal passes (~100%).
+        var rearTolerance = 0.05 * effectiveRadius * targetVelocity.Length;
+
+        bool PassIsRear(Vector2D ray)
+        {
+            var relativeVelocity = targetVelocity - ray.ScaleBy(projectileSpeed);
+            var relativeSpeedSq = relativeVelocity.DotProduct(relativeVelocity);
+            if (relativeSpeedSq < 1e-12)
+                return false;
+
+            var closestApproach = Math.Clamp(
+                -launchOffset.DotProduct(relativeVelocity) / relativeSpeedSq, 0, maxFlight);
+            var centerMinusFront = launchOffset + relativeVelocity.ScaleBy(closestApproach);
+
+            return -centerMinusFront.DotProduct(targetVelocity) <= rearTolerance;
+        }
+
+        Vector2D? bestRay = null;
+        var bestFlight = double.MaxValue;
+        var bestAngle = 0.0;
+
+        // Penetration cap: the deepest point of the pass must stay within the
+        // target's bounding radius, so the HIT-by depth never exceeds it
+        var minAllowedGap = Math.Max(0, effectiveRadius - hitboxRadius);
+
+        void Sweep(double fromAngle, double toAngle, int steps)
+        {
+            for (var i = 0; i <= steps; i++)
+            {
+                var angle = fromAngle + (toAngle - fromAngle) * i / steps;
+                var ray = Rotate(innerRay, angle);
+
+                if (FlightAt(ray) is not double flight || flight >= bestFlight)
+                    continue;
+                if (GapAt(ray) < minAllowedGap)
+                    continue;
+                if (!PassIsRear(ray))
+                    continue;
+
+                bestFlight = flight;
+                bestRay = ray;
+                bestAngle = angle;
+            }
+        }
+
+        Sweep(negativeAngle, positiveAngle, 64);
+        if (bestRay is null)
+            return null;
+
+        var refineStep = (positiveAngle - negativeAngle) / 64;
+        Sweep(bestAngle - refineStep, bestAngle + refineStep, 64);
+
+        var finalRay = bestRay.Value;
+        var castPosition = casterPosition + finalRay.ScaleBy(Math.Max(1.0, projectileSpeed * bestFlight));
+        var time = PredictionFrameContactTime(
+            casterPosition, targetPosition, targetVelocity, effectiveRadius,
+            projectileSpeed, effectiveDelay, finalRay, maxFlight);
+
+        return (time, castPosition);
+    }
+
+    /// <summary>
+    /// Finds a ray with a deep closest approach (below targetGap) to bracket the
+    /// hit arc: the ray through the classical (R = 0) interception point passes
+    /// through the origin of relative space (minGap = 0); when that solve has no
+    /// root (target as fast as or faster than the missile), a coarse 64-ray scan
+    /// looks for any sufficiently deep direction. Null when none exists.
+    /// </summary>
+    private static Vector2D? FindDeepInnerRay(
+        Vector2D launchOffset,
+        Vector2D displacement,
+        Vector2D targetVelocity,
+        double projectileSpeed,
+        double rawDelay,
+        double targetGap,
+        Func<Vector2D, double> gapAt)
+    {
+        var speedSq = projectileSpeed * projectileSpeed;
+        var quadA = targetVelocity.DotProduct(targetVelocity) - speedSq;
+        var quadB = 2.0 * (displacement.DotProduct(targetVelocity) + speedSq * rawDelay);
+        var quadC = displacement.DotProduct(displacement) - speedSq * rawDelay * rawDelay;
+
+        if (MinRootAtOrAfter(quadA, quadB, quadC, rawDelay) is double interceptTime)
+        {
+            var interceptPoint = displacement + targetVelocity.ScaleBy(interceptTime);
+            if (interceptPoint.Length <= 1e-9)
+                return null;
+
+            var ray = interceptPoint.Normalize();
+            // Even the deepest ray may not reach the wanted depth (range-limited)
+            return gapAt(ray) < targetGap ? ray : null;
+        }
+
+        // Coarse scan fallback for geometries where the classical solve has no root
+        var bestGap = double.MaxValue;
+        var bestRay = new Vector2D(1, 0);
+        for (var i = 0; i < 64; i++)
+        {
+            var candidate = Rotate(new Vector2D(1, 0), 2 * Math.PI * i / 64);
+            var gap = gapAt(candidate);
+            if (gap < bestGap)
+            {
+                bestGap = gap;
+                bestRay = candidate;
+            }
+        }
+
+        return bestGap < targetGap ? bestRay : null;
+    }
+
+    private static double SignedAngle(Vector2D from, Vector2D to) =>
+        Math.Atan2(from.X * to.Y - from.Y * to.X, from.DotProduct(to));
+
+    /// <summary>
+    /// Bisects the rotation away from a deep-hitting inner ray until the
+    /// closest approach equals the target gap (within tolerance), returning the
+    /// hitting-side ray. Null when no outer bracket exists in this direction.
+    /// </summary>
+    private static Vector2D? BisectTangentRay(
+        Vector2D innerRay,
+        double rotationSign,
+        double targetGap,
+        Func<Vector2D, double> gapAt)
+    {
+        var low = 0.0;
+        var high = double.NaN;
+
+        for (var delta = 0.05; delta <= Math.PI; delta *= 2)
+        {
+            if (gapAt(Rotate(innerRay, rotationSign * delta)) >= targetGap)
+            {
+                high = delta;
+                break;
+            }
+
+            low = delta;
+        }
+
+        if (double.IsNaN(high))
+        {
+            if (gapAt(Rotate(innerRay, rotationSign * Math.PI)) < targetGap)
+                return null;
+
+            high = Math.PI;
+        }
+
+        for (var i = 0; i < 100; i++)
+        {
+            if (targetGap - gapAt(Rotate(innerRay, rotationSign * low)) <= TangentGapToleranceUnits)
+                break;
+
+            var mid = (low + high) / 2;
+            if (gapAt(Rotate(innerRay, rotationSign * mid)) >= targetGap)
+                high = mid;
+            else
+                low = mid;
+        }
+
+        return Rotate(innerRay, rotationSign * low);
+    }
+
+    /// <summary>
+    /// Reports the contact time in the prediction frame (effectiveDelay), like
+    /// every other mode. The tangent ray is tuned to the sim frame, so in the
+    /// prediction frame it can be a near-miss - then the closest-approach moment
+    /// is reported instead (the two branches are continuous at the boundary).
+    /// </summary>
+    private static double PredictionFrameContactTime(
+        Point2D casterPosition,
+        Point2D targetPosition,
+        Vector2D targetVelocity,
+        double effectiveRadius,
+        double projectileSpeed,
+        double effectiveDelay,
+        Vector2D ray,
+        double maxFlight)
+    {
+        var launchOffset = (targetPosition - casterPosition) + targetVelocity.ScaleBy(effectiveDelay);
+        if (launchOffset.Length <= effectiveRadius)
+            return effectiveDelay;
+
+        var relativeVelocity = targetVelocity - ray.ScaleBy(projectileSpeed);
+        var contactFlight = MinRootAtOrAfter(
+            relativeVelocity.DotProduct(relativeVelocity),
+            2.0 * launchOffset.DotProduct(relativeVelocity),
+            launchOffset.DotProduct(launchOffset) - effectiveRadius * effectiveRadius,
+            0);
+
+        if (contactFlight is double flight)
+            return effectiveDelay + flight;
+
+        var relativeSpeedSq = relativeVelocity.DotProduct(relativeVelocity);
+        var closestApproach = relativeSpeedSq > 1e-12
+            ? Math.Clamp(-launchOffset.DotProduct(relativeVelocity) / relativeSpeedSq, 0, maxFlight)
+            : 0;
+
+        return effectiveDelay + closestApproach;
+    }
+
+    /// <summary>
+    /// Closest approach between missile front and target center over the
+    /// range-clamped flight: distance from the origin of relative space to the
+    /// segment swept by g(s) = launchOffset + relativeVelocity·s, s in [0, maxFlight].
+    /// </summary>
+    private static double ClampedRayMinGap(
+        Vector2D launchOffset, Vector2D relativeVelocity, double maxFlight)
+    {
+        var relativeSpeedSq = relativeVelocity.DotProduct(relativeVelocity);
+        if (relativeSpeedSq < 1e-12)
+            return launchOffset.Length;
+
+        var closestApproach = Math.Clamp(
+            -launchOffset.DotProduct(relativeVelocity) / relativeSpeedSq, 0, maxFlight);
+
+        return (launchOffset + relativeVelocity.ScaleBy(closestApproach)).Length;
+    }
+
+    private static Vector2D Rotate(Vector2D vector, double angle)
+    {
+        var cos = Math.Cos(angle);
+        var sin = Math.Sin(angle);
+        return new Vector2D(vector.X * cos - vector.Y * sin, vector.X * sin + vector.Y * cos);
+    }
+
+    /// <summary>
+    /// Returns the smallest real root of aT² + bT + c = 0 that is >= minTime,
+    /// or null when no such root exists.
+    /// </summary>
+    private static double? MinRootAtOrAfter(double quadA, double quadB, double quadC, double minTime)
+    {
         var (root1, root2) = FindRoots.Quadratic(quadC, quadB, quadA);
 
-        // Find minimum valid real root
         const double ImaginaryTolerance = 1e-9;
-        var maxFlightTime = maxRange / projectileSpeed;
         var interceptTime = double.MaxValue;
 
-        if (Math.Abs(root1.Imaginary) < ImaginaryTolerance && root1.Real >= 0 && root1.Real <= maxFlightTime)
+        if (Math.Abs(root1.Imaginary) < ImaginaryTolerance && root1.Real >= minTime)
             interceptTime = Math.Min(interceptTime, root1.Real);
-        if (Math.Abs(root2.Imaginary) < ImaginaryTolerance && root2.Real >= 0 && root2.Real <= maxFlightTime)
+        if (Math.Abs(root2.Imaginary) < ImaginaryTolerance && root2.Real >= minTime)
             interceptTime = Math.Min(interceptTime, root2.Real);
 
-        if (interceptTime >= double.MaxValue)
-            return null;
-
-        var totalTime = castDelay + interceptTime;
-        var aimPoint = trailingEdgeStart + targetVelocity.ScaleBy(interceptTime);
-
-        if (casterPosition.DistanceTo(aimPoint) > maxRange)
-            return null;
-
-        return (totalTime, aimPoint);
+        return interceptTime < double.MaxValue ? interceptTime : null;
     }
 
     /// <summary>
@@ -462,15 +908,30 @@ public sealed class PredictionEngine : IPredictionEngine
         double hitboxRadius)
     {
         // Get skillshot parameters
-        var (baseDelay, range) = GetSkillshotParams(skillshot);
-        var skillshotSpeed = GetSkillshotSpeed(skillshot);
-        var effectiveDelay = baseDelay + _config.NetworkCompensationDelay;
+        var range = skillshot.GetMaxRange();
+        var effectiveDelay = skillshot.GetDelay() + _config.NetworkCompensationDelay;
 
         // Get target info
         var targetPosition = targetState.GetPosition();
         var targetVelocity = targetState.GetVelocity();
         var targetSpeed = targetVelocity.Length;
-        var effectiveRadius = GetEffectiveRadius(skillshot, hitboxRadius);
+        var effectiveRadius = skillshot.GetEffectiveRadius(hitboxRadius);
+
+        // Instant skillshots apply at the end of the delay - no interception equation needed
+        if (skillshot.GetProjectileSpeed() is not double skillshotSpeed)
+        {
+            var instantAim = targetPosition + targetVelocity.ScaleBy(effectiveDelay);
+            var instantDistance = casterPosition.DistanceTo(instantAim);
+
+            if (instantDistance > range + effectiveRadius)
+                return new PredictionResult.OutOfRange(instantDistance, range);
+
+            return new PredictionResult.Hit(
+                effectiveDelay,
+                instantAim,
+                targetState.PredictPosition(effectiveDelay),
+                ComputeConfidence(casterPosition, instantAim, targetSpeed, double.PositiveInfinity));
+        }
 
         // 1. Calculate Effective Delay: d' = d - R/s
         // This effectively launches the projectile earlier because it only needs to reach the edge
@@ -557,60 +1018,51 @@ public sealed class PredictionEngine : IPredictionEngine
             targetPosition.Y - directionToTarget.Y * effectiveRadius);
     }
 
-    private static (double Delay, double Range) GetSkillshotParams(Skillshot skillshot)
+    private static string CreateCacheKey(Skillshot skillshot, Point2D caster, MovementState target, double hitboxRadius)
     {
-        return skillshot.Match(
-            linear: l => ((double)l.Delay, (double)l.Range),
-            circular: c => ((double)c.Delay, (double)c.Range),
-            cone: c => ((double)c.Delay, (double)c.Range),
-            arc: a => ((double)a.Delay, (double)a.OuterRadius),
-            rectangle: r => ((double)r.Delay, (double)r.Range),
-            vectorRectangle: v => ((double)v.Delay, (double)(v.Range + v.MaxLength)));
-    }
-
-    /// <summary>
-    /// Gets the projectile speed for a skillshot. Returns a high value for instant skillshots.
-    /// </summary>
-    private static double GetSkillshotSpeed(Skillshot skillshot)
-    {
-        return skillshot.Match(
-            linear: l => (double)l.Speed,
-            circular: _ => double.MaxValue, // Instant cast (no projectile travel time)
-            cone: _ => double.MaxValue,     // Instant cast (no projectile travel time)
-            arc: a => (double)a.Speed,
-            rectangle: r => (double)r.Speed,
-            vectorRectangle: v => (double)v.Speed);
-    }
-
-    /// <summary>
-    /// Gets the effective hit radius for a skillshot type.
-    /// This is the distance from target center at which a hit occurs.
-    /// </summary>
-    private static double GetEffectiveRadius(Skillshot skillshot, double hitboxRadius)
-    {
-        return skillshot.Match(
-            linear: l => l.Width / 2.0 + hitboxRadius,
-            circular: c => c.Radius + hitboxRadius,
-            cone: _ => hitboxRadius, // Cone has no width (instant area-of-effect from point)
-            arc: a => a.Width / 2.0 + hitboxRadius,
-            rectangle: r => r.Width / 2.0 + hitboxRadius,
-            vectorRectangle: v => v.Width / 2.0 + hitboxRadius);
-    }
-
-    private static string CreateCacheKey(Skillshot skillshot, Point2D caster, MovementState target)
-    {
-        var targetPos = target.GetPosition();
-        var targetVel = target.GetVelocity();
-
         // Round positions to reduce cache misses from tiny movements
         var cx = Math.Round(caster.X / 10) * 10;
         var cy = Math.Round(caster.Y / 10) * 10;
-        var tx = Math.Round(targetPos.X / 10) * 10;
-        var ty = Math.Round(targetPos.Y / 10) * 10;
-        var vx = Math.Round(targetVel.X / 50) * 50;
-        var vy = Math.Round(targetVel.Y / 50) * 50;
 
-        return $"{skillshot.GetHashCode()}:{cx},{cy}:{tx},{ty}:{vx},{vy}";
+        // Record ToString includes the type name and all parameters, so distinct
+        // skillshots can never alias (unlike GetHashCode, which can collide)
+        return $"{skillshot}:{cx},{cy}:{DescribeState(target)}:{Math.Round(hitboxRadius)}";
+    }
+
+    private static string DescribeState(MovementState state)
+    {
+        var pos = state.GetPosition();
+        var vel = state.GetVelocity();
+        var tx = Math.Round(pos.X / 10) * 10;
+        var ty = Math.Round(pos.Y / 10) * 10;
+        var vx = Math.Round(vel.X / 50) * 50;
+        var vy = Math.Round(vel.Y / 50) * 50;
+        var basic = $"{tx},{ty}:{vx},{vy}";
+
+        return state switch
+        {
+            MovementState.Idle => $"I:{basic}",
+            MovementState.Walking => $"W:{basic}",
+            MovementState.Dashing d =>
+                $"D:{basic}:{Math.Round(d.EndPosition.X)},{Math.Round(d.EndPosition.Y)}:{d.Duration:F2}:{Math.Round(d.Elapsed, 2)}:{d.EaseType}",
+            MovementState.Channeling c => $"C:{basic}:{Math.Round(c.Acceleration)}",
+            MovementState.Pathing p =>
+                $"P:{basic}:{Math.Round(p.Speed)}:{p.CurrentIndex}:{Math.Round(p.ProgressOnSegment, 2)}:{DescribeWaypoints(p.Waypoints)}",
+            _ => basic
+        };
+    }
+
+    private static string DescribeWaypoints(IReadOnlyList<Point2D> waypoints)
+    {
+        var hash = new HashCode();
+        hash.Add(waypoints.Count);
+        foreach (var waypoint in waypoints)
+        {
+            hash.Add(Math.Round(waypoint.X / 10) * 10);
+            hash.Add(Math.Round(waypoint.Y / 10) * 10);
+        }
+
+        return hash.ToHashCode().ToString();
     }
 
     /// <inheritdoc />

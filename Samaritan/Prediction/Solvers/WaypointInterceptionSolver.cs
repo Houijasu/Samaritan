@@ -48,12 +48,49 @@ public sealed class WaypointInterceptionSolver : IInterceptionSolver
         if (segments.Count == 0)
             return null;
 
-        // Get skillshot parameters
-        var (delay, speed, range) = GetSkillshotParams(skillshot);
+        var delay = skillshot.GetDelay();
+        var range = skillshot.GetMaxRange();
+
+        // Instant skillshots (cones, zero-speed AoE) apply at the end of the delay
+        if (skillshot.GetProjectileSpeed() is not double projectileSpeed)
+        {
+            var instantPosition = pathing.PredictPosition(delay);
+            if (sourcePosition.DistanceTo(instantPosition) > range)
+                return null;
+
+            return InterceptionSolution.Exact(delay, instantPosition);
+        }
+
+        var effectiveRadius = skillshot.GetEffectiveRadius(hitboxRadius);
+        var solution = SolveOnPath(sourcePosition, segments, delay, projectileSpeed, range, effectiveRadius);
+
+        return solution is null
+            ? null
+            : InterceptionSolution.Exact(solution.Value.Time, solution.Value.AimPoint);
+    }
+
+    /// <summary>
+    /// Core segment-by-segment interception, shared with the prediction engine.
+    /// Cuts the path by (delay * targetSpeed - effectiveRadius) to account for cast
+    /// delay and trailing edge, then solves the per-segment quadratic.
+    /// Returns the interception time measured from now (including the delay) and
+    /// the aim point on the cut path, or null when no interception exists.
+    /// </summary>
+    internal static (double Time, Point2D AimPoint)? SolveOnPath(
+        Point2D sourcePosition,
+        List<PathSegment> segments,
+        double delay,
+        double projectileSpeed,
+        double range,
+        double effectiveRadius)
+    {
+        if (segments.Count == 0)
+            return null;
+
         var targetSpeed = segments[0].Velocity.Length;
 
-        // Cut path by (delay * targetSpeed - hitbox) to account for cast delay and trailing edge
-        var cutLength = delay * targetSpeed - hitboxRadius;
+        // Cut path by (delay * targetSpeed - effectiveRadius) to account for cast delay and trailing edge
+        var cutLength = delay * targetSpeed - effectiveRadius;
         var cutSegments = CutPath(segments, cutLength);
 
         if (cutSegments.Count == 0)
@@ -62,7 +99,7 @@ public sealed class WaypointInterceptionSolver : IInterceptionSolver
         // Iterate through segments to find interception point
         double tTotal = 0;
         const double Epsilon = 1e-4;
-        var sqrSpeed = speed * speed;
+        var sqrSpeed = projectileSpeed * projectileSpeed;
 
         foreach (var segment in cutSegments)
         {
@@ -91,10 +128,7 @@ public sealed class WaypointInterceptionSolver : IInterceptionSolver
                 var aimPoint = segment.Start + velocity.ScaleBy(tIntercept);
 
                 if (sourcePosition.DistanceTo(aimPoint) <= range)
-                {
-                    var totalTime = delay + tTotal + tIntercept;
-                    return InterceptionSolution.Exact(totalTime, aimPoint);
-                }
+                    return (delay + tTotal + tIntercept, aimPoint);
             }
 
             tTotal += duration;
@@ -157,16 +191,5 @@ public sealed class WaypointInterceptionSolver : IInterceptionSolver
         var last = segments[^1];
         result.Add(new PathSegment(last.End, last.End, last.EndTime, last.EndTime, last.Speed));
         return result;
-    }
-
-    private static (double Delay, double Speed, double Range) GetSkillshotParams(Skillshot skillshot)
-    {
-        return skillshot.Match(
-            linear: l => ((double)l.Delay, (double)l.Speed, (double)l.Range),
-            circular: c => ((double)c.Delay, (double)c.Speed, (double)c.Range),
-            cone: c => ((double)c.Delay, 0.0, (double)c.Range),
-            arc: a => ((double)a.Delay, (double)a.Speed, (double)a.OuterRadius),
-            rectangle: r => ((double)r.Delay, (double)r.Speed, (double)r.Range),
-            vectorRectangle: v => ((double)v.Delay, (double)v.Speed, (double)(v.Range + v.MaxLength)));
     }
 }

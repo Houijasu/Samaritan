@@ -73,12 +73,6 @@ public class SimulationGame : Game
     {
         Window.Title = "Samaritan - Skillshot Prediction Simulation";
 
-        // Center the world origin on screen
-        // _worldOffset is now calculated dynamically in ScreenToWorld based on current Viewport
-        // _worldOffset = new Vector2(
-        //    _graphics.PreferredBackBufferWidth / 2f,
-        //    _graphics.PreferredBackBufferHeight / 2f);
-
         base.Initialize();
     }
 
@@ -86,9 +80,9 @@ public class SimulationGame : Game
     {
         _spriteBatch = new SpriteBatch(GraphicsDevice);
 
-        // Create renderers (offset is calculated dynamically based on viewport)
-        _gridRenderer = new GridRenderer(GraphicsDevice, WorldScale, Vector2.Zero);
-        _entityRenderer = new EntityRenderer(GraphicsDevice, WorldScale, Vector2.Zero);
+        // Create renderers (world origin is centered in the viewport)
+        _gridRenderer = new GridRenderer(GraphicsDevice, WorldScale);
+        _entityRenderer = new EntityRenderer(GraphicsDevice, WorldScale);
         _hudRenderer = new HudRenderer(GraphicsDevice, _spriteBatch);
 
         // Load scenarios - start with scenario 2 (moving target) for better demo
@@ -198,6 +192,12 @@ public class SimulationGame : Game
         if (WasKeyPressed(keyState, Keys.OemMinus) || WasKeyPressed(keyState, Keys.Subtract))
         {
             _simulationSpeed = Math.Max(0.25, _simulationSpeed / 2);
+        }
+
+        // Cycle prediction method (Before = legacy, After = current) and re-run
+        if (WasKeyPressed(keyState, Keys.M))
+        {
+            _runner.CycleMethod();
         }
 
         // Update simulation
@@ -356,7 +356,8 @@ public class SimulationGame : Game
             _currentScenarioIndex,
             _scenarios.Length,
             _simulationSpeed,
-            _isPaused);
+            _isPaused,
+            _runner.Method);
 
         base.Draw(gameTime);
     }

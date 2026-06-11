@@ -70,6 +70,23 @@ public class SimulationState
     public double? SinTheta { get; set; }
 
     /// <summary>
+    /// Closest approach between the missile front and the target center over the
+    /// simulated flight (projectile skillshots only).
+    /// </summary>
+    public double? GrazeGap { get; set; }
+
+    /// <summary>
+    /// Effective hit radius (skillshot width/2 + target hitbox) the graze gap is
+    /// compared against.
+    /// </summary>
+    public double? GrazeRadius { get; set; }
+
+    /// <summary>
+    /// Angle in degrees between the target's movement direction and the missile ray.
+    /// </summary>
+    public double? ApproachAngleDegrees { get; set; }
+
+    /// <summary>
     /// Actual time when hit occurred (if any).
     /// </summary>
     public double? ActualHitTime { get; set; }
@@ -131,6 +148,9 @@ public class SimulationState
         ExactPredictedTime = null;
         CosTheta = null;
         SinTheta = null;
+        GrazeGap = null;
+        GrazeRadius = null;
+        ApproachAngleDegrees = null;
         ActualHitTime = null;
         ActualHitPosition = null;
         ProjectileLaunched = false;

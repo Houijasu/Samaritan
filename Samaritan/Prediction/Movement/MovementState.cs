@@ -318,7 +318,8 @@ public static class MovementStateExtensions
     /// </summary>
     public static IEnumerable<PathSegment> GetPathSegments(this MovementState.Pathing pathing)
     {
-        if (pathing.Waypoints.Count < 2)
+        // A finished path (CurrentIndex past the last waypoint) has no segments left
+        if (pathing.Waypoints.Count < 2 || pathing.CurrentIndex >= pathing.Waypoints.Count)
             yield break;
 
         var currentPos = GetPathingPosition(pathing);

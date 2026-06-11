@@ -1,4 +1,4 @@
-﻿namespace Samaritan.Prediction.Collision;
+namespace Samaritan.Prediction.Collision;
 
 using MathNet.Spatial.Euclidean;
 
@@ -11,7 +11,7 @@ public sealed class ConeCollisionDetector : ICollisionDetector
     public bool WillHit(
         Skillshot skillshot,
         Point2D origin,
-        Vector2D aimDirection,
+        Point2D aimPosition,
         Point2D targetPosition,
         double targetHitboxRadius,
         double timeElapsed)
@@ -25,6 +25,14 @@ public sealed class ConeCollisionDetector : ICollisionDetector
         {
             return false;
         }
+
+        var aimVector = aimPosition - origin;
+        if (aimVector.Length < 1e-9)
+        {
+            return false;
+        }
+
+        var aimDirection = aimVector.Normalize();
 
         var toTarget = targetPosition - origin;
         var distance = toTarget.Length;

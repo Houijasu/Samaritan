@@ -88,16 +88,26 @@ public class HudRenderer
         int scenarioIndex,
         int totalScenarios,
         double speed,
-        bool isPaused)
+        bool isPaused,
+        PredictionMethod method)
     {
         _spriteBatch.Begin();
 
         // Top-left panel: Scenario info
-        DrawPanel(10, 10, 350, 130);
+        DrawPanel(10, 10, 350, 160);
         DrawText($"Scenario {scenarioIndex + 1}/{totalScenarios}", 20, 18, TextColor, _fontLarge);
         DrawText(scenario.Name, 20, 48, WarningColor, _font);
         DrawText($"Skillshot: {GetSkillshotTypeName(scenario.Skillshot)}", 20, 73, TextColor, _font);
         DrawText($"Target Hitbox: {scenario.HitboxRadius:F0} units", 20, 98, TextColor, _font);
+
+        var (methodLabel, methodColor) = method switch
+        {
+            PredictionMethod.Before => ("BEFORE (legacy)", WarningColor),
+            PredictionMethod.Nearest => ("NEAREST (tangent)", Color.Cyan),
+            PredictionMethod.Optimal => ("OPTIMAL (fast rear)", Color.Orange),
+            _ => ("AFTER (rear graze)", HitColor)
+        };
+        DrawText($"Method: {methodLabel}", 20, 128, methodColor, _font);
 
         // Top-right panel: Playback controls
         var rightX = _device.Viewport.Width - 300;
@@ -109,11 +119,11 @@ public class HudRenderer
         DrawText($"Speed: {speed:F2}x  [{statusText}]", rightX + 10, 48, statusColor, _font);
         DrawText("Space: Play/Pause   R: Reset", rightX + 10, 73, DimColor, _fontSmall);
         DrawText("Left/Right: Scenarios   +/-: Speed", rightX + 10, 93, DimColor, _fontSmall);
-        DrawText("Esc: Exit", rightX + 10, 113, DimColor, _fontSmall);
+        DrawText("M: Method (Before/After)   Esc: Exit", rightX + 10, 113, DimColor, _fontSmall);
 
         // Bottom panel: Simulation metrics
-        var bottomY = _device.Viewport.Height - 210;
-        DrawPanel(10, bottomY, 500, 200);
+        var bottomY = _device.Viewport.Height - 260;
+        DrawPanel(10, bottomY, 500, 250);
         DrawText("Simulation Results", 20, bottomY + 8, TextColor, _fontLarge);
         DrawText($"Time: {state.Time:F3}s   Phase: {state.Phase}", 20, bottomY + 38, TextColor, _font);
 
@@ -159,8 +169,24 @@ public class HudRenderer
             DrawText($"Target Position: ({state.TargetPosition.X:F0}, {state.TargetPosition.Y:F0})",
                 20, bottomY + 138, TextColor, _font);
 
+            DrawText($"Caster Position: ({scenario.CasterPosition.X:F0}, {scenario.CasterPosition.Y:F0})",
+                20, bottomY + 163, TextColor, _font);
+
             var velStr = $"Velocity: ({state.TargetVelocity.X:F0}, {state.TargetVelocity.Y:F0})";
-            DrawText(velStr, 20, bottomY + 163, TextColor, _font);
+            DrawText(velStr, 20, bottomY + 188, TextColor, _font);
+        }
+
+        // Graze margin: how far the simulated flight is from the tangency boundary
+        if (state.GrazeGap.HasValue && state.GrazeRadius.HasValue)
+        {
+            var margin = state.GrazeRadius.Value - state.GrazeGap.Value;
+            var verdict = margin >= 0 ? $"HIT by {margin:F1}" : $"MISS by {-margin:F1}";
+            var grazeColor = margin >= 0 ? HitColor : MissColor;
+            var angleText = state.ApproachAngleDegrees.HasValue
+                ? $"   Ray angle: {state.ApproachAngleDegrees:F1} deg"
+                : "";
+            DrawText($"Graze: {state.GrazeGap:F1} / R {state.GrazeRadius:F0} ({verdict}){angleText}",
+                20, bottomY + 213, grazeColor, _font);
         }
 
         // Legend panel (bottom right)
