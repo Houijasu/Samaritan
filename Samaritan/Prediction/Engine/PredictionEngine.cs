@@ -119,11 +119,15 @@ public sealed class PredictionEngine : IPredictionEngine
         double hitboxRadius,
         ProjectileAimMode aimMode = ProjectileAimMode.RearGraze)
     {
-        // Check cache
-        var cacheKey = $"{CreateCacheKey(skillshot, casterPosition, targetState, hitboxRadius)}:{(int)aimMode}";
-        if (_cache?.TryGet(cacheKey, out var cachedResult) == true)
+        // Check cache (key construction skipped entirely when caching is off)
+        string? cacheKey = null;
+        if (_cache is not null)
         {
-            return cachedResult;
+            cacheKey = $"{CreateCacheKey(skillshot, casterPosition, targetState, hitboxRadius)}:{(int)aimMode}";
+            if (_cache.TryGet(cacheKey, out var cachedResult))
+            {
+                return cachedResult;
+            }
         }
 
         // Get skillshot parameters
@@ -252,7 +256,10 @@ public sealed class PredictionEngine : IPredictionEngine
         }
 
         // Cache result
-        _cache?.Set(cacheKey, result);
+        if (cacheKey is not null)
+        {
+            _cache!.Set(cacheKey, result);
+        }
 
         return result;
     }

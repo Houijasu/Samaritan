@@ -1,4 +1,4 @@
-﻿namespace Samaritan.Simulation.Scenarios;
+namespace Samaritan.Simulation.Scenarios;
 
 using MathNet.Spatial.Euclidean;
 
@@ -6,42 +6,49 @@ using Samaritan.Simulation.Core;
 
 /// <summary>
 /// Built-in scenarios for testing prediction accuracy.
+/// All scenarios use Nidalee Q (Javelin Toss); they differ by target movement.
 /// </summary>
 public static class BuiltInScenarios
 {
+    /// <summary>
+    /// Nidalee Q (Javelin Toss): narrow, fast, long-range linear skillshot.
+    /// </summary>
+    private static Skillshot.Linear NidaleeQ => new(
+        Delay: 0.25f, Speed: 1300, Width: 40, Range: 1500);
+
     /// <summary>
     /// Gets all built-in test scenarios.
     /// </summary>
     /// <returns>Array of all predefined scenarios.</returns>
     public static Scenario[] GetAll() =>
     [
-        LinearVsStationary(),
-        LinearVsWalkingPerpendicular(),
-        LinearVsWalkingAway(),
-        CircularVsWalking(),
-        ConeVsClose(),
-        LinearVsFastTarget(),
-        ArcVsWalking(),
-        LinearVsWaypointPath(),
-        LinearVsZigzagPath()
+        VsStationary(),
+        VsWalkingPerpendicular(),
+        VsWalkingAway(),
+        VsWalkingDiagonal(),
+        VsCloseTarget(),
+        VsFastTarget(),
+        VsWalkingCrossing(),
+        VsWaypointPath(),
+        VsZigzagPath()
     ];
 
     /// <summary>
-    /// Ezreal Q vs stationary target - baseline accuracy test.
+    /// Stationary target - baseline accuracy test.
     /// </summary>
-    public static Scenario LinearVsStationary() => new(
-        Name: "Linear vs Stationary",
-        Skillshot: new Skillshot.Linear(Delay: 0.25f, Speed: 2000, Width: 60, Range: 1150),
+    public static Scenario VsStationary() => new(
+        Name: "Nidalee Q vs Stationary",
+        Skillshot: NidaleeQ,
         CasterPosition: new Point2D(0, 0),
         TargetMovement: new MovementPattern.Stationary(new Point2D(700, 0)),
         HitboxRadius: 65);
 
     /// <summary>
-    /// Ezreal Q vs target moving perpendicular - tests leading.
+    /// Target moving perpendicular - tests leading.
     /// </summary>
-    public static Scenario LinearVsWalkingPerpendicular() => new(
-        Name: "Linear vs Walking (Perpendicular)",
-        Skillshot: new Skillshot.Linear(Delay: 0.25f, Speed: 2000, Width: 60, Range: 1150),
+    public static Scenario VsWalkingPerpendicular() => new(
+        Name: "Nidalee Q vs Walking (Perpendicular)",
+        Skillshot: NidaleeQ,
         CasterPosition: new Point2D(0, 0),
         TargetMovement: new MovementPattern.Linear(
             Start: new Point2D(600, -200),
@@ -50,11 +57,11 @@ public static class BuiltInScenarios
         HitboxRadius: 65);
 
     /// <summary>
-    /// Ezreal Q vs target running away - hardest to hit.
+    /// Target running away - hardest to catch up to.
     /// </summary>
-    public static Scenario LinearVsWalkingAway() => new(
-        Name: "Linear vs Walking (Away)",
-        Skillshot: new Skillshot.Linear(Delay: 0.25f, Speed: 2000, Width: 60, Range: 1150),
+    public static Scenario VsWalkingAway() => new(
+        Name: "Nidalee Q vs Walking (Away)",
+        Skillshot: NidaleeQ,
         CasterPosition: new Point2D(0, 0),
         TargetMovement: new MovementPattern.Linear(
             Start: new Point2D(500, 0),
@@ -63,11 +70,11 @@ public static class BuiltInScenarios
         HitboxRadius: 65);
 
     /// <summary>
-    /// Lux E vs moving target - area damage prediction.
+    /// Target moving diagonally toward the caster's side.
     /// </summary>
-    public static Scenario CircularVsWalking() => new(
-        Name: "Circular vs Walking",
-        Skillshot: new Skillshot.Circular(Delay: 0.25f, Speed: 1200, Radius: 350, Range: 1100),
+    public static Scenario VsWalkingDiagonal() => new(
+        Name: "Nidalee Q vs Walking (Diagonal)",
+        Skillshot: NidaleeQ,
         CasterPosition: new Point2D(0, 0),
         TargetMovement: new MovementPattern.Linear(
             Start: new Point2D(700, 100),
@@ -76,11 +83,11 @@ public static class BuiltInScenarios
         HitboxRadius: 65);
 
     /// <summary>
-    /// Annie W vs close target - cone accuracy.
+    /// Close target moving across - short reaction window.
     /// </summary>
-    public static Scenario ConeVsClose() => new(
-        Name: "Cone vs Close Target",
-        Skillshot: new Skillshot.Cone(Delay: 0.25f, Angle: 50, Range: 600),
+    public static Scenario VsCloseTarget() => new(
+        Name: "Nidalee Q vs Close Target",
+        Skillshot: NidaleeQ,
         CasterPosition: new Point2D(0, 0),
         TargetMovement: new MovementPattern.Linear(
             Start: new Point2D(400, 50),
@@ -89,11 +96,11 @@ public static class BuiltInScenarios
         HitboxRadius: 65);
 
     /// <summary>
-    /// Morgana Q vs fast target - slow skillshot vs fast movement.
+    /// Fast diagonal target - high speed relative to the javelin.
     /// </summary>
-    public static Scenario LinearVsFastTarget() => new(
-        Name: "Linear vs Fast Target",
-        Skillshot: new Skillshot.Linear(Delay: 0.25f, Speed: 1200, Width: 70, Range: 1175),
+    public static Scenario VsFastTarget() => new(
+        Name: "Nidalee Q vs Fast Target",
+        Skillshot: NidaleeQ,
         CasterPosition: new Point2D(0, 0),
         TargetMovement: new MovementPattern.Linear(
             Start: new Point2D(600, -300),
@@ -102,17 +109,11 @@ public static class BuiltInScenarios
         HitboxRadius: 65);
 
     /// <summary>
-    /// Diana Q arc vs moving target.
+    /// Target crossing toward the line of fire at long range.
     /// </summary>
-    public static Scenario ArcVsWalking() => new(
-        Name: "Arc vs Walking",
-        Skillshot: new Skillshot.Arc(
-            Delay: 0.25f,
-            Speed: 1900,
-            Width: 185,
-            OuterRadius: 900,
-            Angle: 250,
-            Clockwise: false),
+    public static Scenario VsWalkingCrossing() => new(
+        Name: "Nidalee Q vs Walking (Crossing)",
+        Skillshot: NidaleeQ,
         CasterPosition: new Point2D(0, 0),
         TargetMovement: new MovementPattern.Linear(
             Start: new Point2D(600, 200),
@@ -121,12 +122,12 @@ public static class BuiltInScenarios
         HitboxRadius: 65);
 
     /// <summary>
-    /// Ezreal Q vs target following L-shaped waypoint path.
-    /// Tests prediction when target changes direction mid-path.
+    /// Target following an L-shaped waypoint path.
+    /// Tests prediction when the target changes direction mid-path.
     /// </summary>
-    public static Scenario LinearVsWaypointPath() => new(
-        Name: "Linear vs Waypoint Path",
-        Skillshot: new Skillshot.Linear(Delay: 0.25f, Speed: 2000, Width: 60, Range: 1150),
+    public static Scenario VsWaypointPath() => new(
+        Name: "Nidalee Q vs Waypoint Path",
+        Skillshot: NidaleeQ,
         CasterPosition: new Point2D(0, 0),
         TargetMovement: new MovementPattern.Waypoints(
             Points:
@@ -139,12 +140,12 @@ public static class BuiltInScenarios
         HitboxRadius: 65);
 
     /// <summary>
-    /// Morgana Q vs target in zigzag evasion pattern.
+    /// Target in a zigzag evasion pattern.
     /// Challenging scenario with multiple direction changes.
     /// </summary>
-    public static Scenario LinearVsZigzagPath() => new(
-        Name: "Linear vs Zigzag Path",
-        Skillshot: new Skillshot.Linear(Delay: 0.25f, Speed: 1200, Width: 70, Range: 1175),
+    public static Scenario VsZigzagPath() => new(
+        Name: "Nidalee Q vs Zigzag Path",
+        Skillshot: NidaleeQ,
         CasterPosition: new Point2D(0, 0),
         TargetMovement: new MovementPattern.Waypoints(
             Points:

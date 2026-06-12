@@ -102,9 +102,9 @@ public class HudRenderer
 
         var (methodLabel, methodColor) = method switch
         {
-            PredictionMethod.Before => ("BEFORE (legacy)", WarningColor),
             PredictionMethod.Nearest => ("NEAREST (tangent)", Color.Cyan),
             PredictionMethod.Optimal => ("OPTIMAL (fast rear)", Color.Orange),
+            PredictionMethod.Gagong => ("GAGONG (lua port)", Color.Violet),
             _ => ("AFTER (rear graze)", HitColor)
         };
         DrawText($"Method: {methodLabel}", 20, 128, methodColor, _font);

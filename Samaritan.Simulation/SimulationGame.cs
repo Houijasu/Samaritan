@@ -87,7 +87,7 @@ public class SimulationGame : Game
 
         // Load scenarios - start with scenario 2 (moving target) for better demo
         _scenarios = BuiltInScenarios.GetAll();
-        _currentScenarioIndex = 1; // Start with "Linear vs Walking (Perpendicular)"
+        _currentScenarioIndex = 1; // Start with "Nidalee Q vs Walking (Perpendicular)"
 
         // Initialize simulation runner
         _runner = new SimulationRunner();

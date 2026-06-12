@@ -14,9 +14,6 @@ using Samaritan.Simulation.Scenarios;
 /// </summary>
 public enum PredictionMethod
 {
-    /// <summary>Pre-audit legacy algorithm, preserved for comparison.</summary>
-    Before,
-
     /// <summary>Current algorithm: rear-edge graze (latest contact).</summary>
     After,
 
@@ -24,7 +21,10 @@ public enum PredictionMethod
     Nearest,
 
     /// <summary>Current algorithm: earliest rear-side contact, cast at the contact point.</summary>
-    Optimal
+    Optimal,
+
+    /// <summary>Port of the community "Gagong" Lua prediction routine, for comparison.</summary>
+    Gagong
 }
 
 /// <summary>
@@ -33,7 +33,7 @@ public enum PredictionMethod
 public class SimulationRunner
 {
     private readonly PredictionEngine _engine = new();
-    private readonly LegacyPredictionEngine _legacyEngine = new();
+    private readonly GagongPredictionEngine _gagongEngine = new();
     private readonly SimulationLogger _logger = new();
     private Scenario? _scenario;
 
@@ -46,17 +46,17 @@ public class SimulationRunner
 
     /// <summary>
     /// Cycles between the prediction algorithms
-    /// (Before -> After -> Nearest -> Optimal) and recomputes the prediction
+    /// (After -> Nearest -> Optimal -> Gagong) and recomputes the prediction
     /// for the loaded scenario.
     /// </summary>
     public void CycleMethod()
     {
         Method = Method switch
         {
-            PredictionMethod.Before => PredictionMethod.After,
             PredictionMethod.After => PredictionMethod.Nearest,
             PredictionMethod.Nearest => PredictionMethod.Optimal,
-            _ => PredictionMethod.Before
+            PredictionMethod.Optimal => PredictionMethod.Gagong,
+            _ => PredictionMethod.After
         };
         Reset();
     }
@@ -130,11 +130,6 @@ public class SimulationRunner
         // Get prediction using the movement state and the selected algorithm
         State.Prediction = Method switch
         {
-            PredictionMethod.Before => _legacyEngine.PredictFromState(
-                _scenario.Skillshot,
-                _scenario.CasterPosition,
-                movementState,
-                _scenario.HitboxRadius),
             PredictionMethod.Nearest => _engine.PredictFromState(
                 _scenario.Skillshot,
                 _scenario.CasterPosition,
@@ -147,6 +142,11 @@ public class SimulationRunner
                 movementState,
                 _scenario.HitboxRadius,
                 ProjectileAimMode.Optimal),
+            PredictionMethod.Gagong => _gagongEngine.PredictFromState(
+                _scenario.Skillshot,
+                _scenario.CasterPosition,
+                movementState,
+                _scenario.HitboxRadius),
             _ => _engine.PredictFromState(
                 _scenario.Skillshot,
                 _scenario.CasterPosition,

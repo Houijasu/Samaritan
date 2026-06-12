@@ -14,7 +14,7 @@ A skillshot prediction engine for League of Legends with real-time visualization
   slip between simulation frames
 - **Network compensation** - Adjusts predictions for ping, server tick, and cast delay
 - **Real-time simulation** - Visual A/B testing environment built with MonoGame, with a
-  live graze-margin readout and a legacy algorithm preserved for comparison
+  live graze-margin readout and selectable prediction methods for comparison
 
 ## Projects
 
@@ -23,6 +23,7 @@ A skillshot prediction engine for League of Legends with real-time visualization
 | `Samaritan` | Core prediction engine library |
 | `Samaritan.Simulation` | MonoGame visualization for testing predictions |
 | `Samaritan.Tests` | Unit tests (xUnit) |
+| `Samaritan.Benchmarks` | BenchmarkDotNet comparison of the prediction techniques |
 
 ## Requirements
 
@@ -45,7 +46,7 @@ dotnet run --project Samaritan.Simulation
 | R | Reset current scenario |
 | Left / Right | Previous / next scenario |
 | + / - | Simulation speed (0.25x - 4x) |
-| **M** | Cycle prediction method: BEFORE (legacy) / AFTER (rear graze) / NEAREST (tangent) / OPTIMAL (fast rear) |
+| **M** | Cycle prediction method: AFTER (rear graze) / NEAREST (tangent) / OPTIMAL (fast rear) / GAGONG (lua port) |
 | Esc | Exit |
 | Mouse drag | Yellow handles move the caster / target start; the green handle sets the target's movement direction |
 
@@ -64,6 +65,11 @@ flight versus the effective radius, i.e. how far the shot is from the tangency b
 All modes fall back gracefully (`OutOfRange` / `Unreachable` / rear-graze) when their
 constraint set is empty. Placed effects (circular, rectangle, vector) always center the
 detonation on the predicted target position instead.
+
+The simulation additionally offers **GAGONG**, a faithful port of a community Lua
+prediction routine, kept as a comparison reference. Benchmarks (Nidalee Q, per call,
+caching disabled): RearGraze ~150 ns, NearestRear ~260 ns, Gagong ~370 ns,
+Optimal ~2.8 us.
 
 ## Algorithm
 
