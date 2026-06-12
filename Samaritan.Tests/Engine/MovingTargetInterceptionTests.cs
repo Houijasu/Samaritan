@@ -49,30 +49,32 @@ public class MovingTargetInterceptionTests
 
     /// <summary>
     /// Projectile skillshots aim BEHIND the target: the cast position trails the
-    /// predicted center along the movement direction by roughly the effective
-    /// radius, so the missile grazes the rear edge of the hitbox as the target
-    /// passes over the impact point (dodge-resistant aim - a target that stops
-    /// still gets hit center-mass).
+    /// predicted center: the default mode casts on the hitbox rim at the
+    /// exact-time contact, on the rear side (broadside tolerated).
     /// </summary>
     [Fact]
-    public void PredictFromState_LinearVsMovingTarget_AimsBehindTargetAlongMovementPath()
+    public void PredictFromState_LinearVsMovingTarget_CastsOnHitboxRimNotAheadOfCenter()
     {
         const double EffectiveRadius = 95; // width/2 + hitbox = 30 + 65
 
         var engine = new PredictionEngine(ZeroLatencyConfig, enableCaching: false);
         var skillshot = new Skillshot.Linear(Delay: 0.25f, Speed: 2000, Width: 60, Range: 2000);
         var caster = new Point2D(0, 0);
-
-        // Target moving straight up (+Y); the aim point must trail it straight down
-        var target = new MovementState.Walking(new Point2D(500, 0), new Vector2D(0, 300), null);
+        var velocity = new Vector2D(0, 300);
+        var target = new MovementState.Walking(new Point2D(500, 0), velocity, null);
 
         var result = engine.PredictFromState(skillshot, caster, target, hitboxRadius: 65);
 
         var hit = Assert.IsType<PredictionResult.Hit>(result);
 
-        var trailingOffset = hit.PredictedPosition - hit.CastPosition;
-        Assert.Equal(0, trailingOffset.X, precision: 0); // purely along the path
-        Assert.InRange(trailingOffset.Y, EffectiveRadius * 0.4, EffectiveRadius * 1.6);
+        // Cast position sits on the hitbox rim at the exact-time contact...
+        Assert.Equal(EffectiveRadius, hit.CastPosition.DistanceTo(hit.PredictedPosition), precision: 0);
+
+        // ...never ahead of the center relative to its movement (broadside tolerated)
+        var rearDot = (hit.CastPosition - hit.PredictedPosition).DotProduct(velocity);
+        Assert.True(
+            rearDot <= 0.05 * EffectiveRadius * velocity.Length,
+            $"Cast must not sit ahead of the center (rearDot = {rearDot:F0})");
     }
 
     /// <summary>
@@ -120,12 +122,14 @@ public class MovingTargetInterceptionTests
             Math.Abs(firstContact.Value - hit.InterceptionTime) < 0.01,
             $"True first contact at {firstContact:F3}s but reported {hit.InterceptionTime:F3}s - missile clips the flank early");
 
-        // The contact point must be behind the center relative to its movement
+        // The contact point must not land on the leading side of the center
+        // (broadside tolerated - the exact-time touch can sit near 90 degrees)
         var frontAtContact = caster + rayDirection.ScaleBy(ProjectileSpeed * (hit.InterceptionTime - Delay));
         var centerAtContact = targetStart + velocity.ScaleBy(hit.InterceptionTime);
+        var rearDot = (frontAtContact - centerAtContact).DotProduct(velocity);
         Assert.True(
-            (frontAtContact - centerAtContact).DotProduct(velocity) < 0,
-            "Contact must land behind the target's center, not on its leading side");
+            rearDot <= 0.05 * EffectiveRadius * velocity.Length,
+            $"Contact must not land on the leading side (rearDot = {rearDot:F0})");
     }
 
     /// <summary>

@@ -26,12 +26,19 @@ using Samaritan.Prediction.Results;
 /// convergence, 20 bisection iterations, and the 1000-unit backward segment
 /// extension. Fixed relative to the source: the undefined second return value
 /// (`p2`) and missing range/degenerate-input guards.
+///
+/// Performance notes (behavior-identical, pinned by golden-value tests):
+/// straight-line movers take an allocation-free fast path; the refinement loop
+/// runs on scalars with the circle-circle intersection reduced via the
+/// right-angle property of the tangent-length construction (along = f²/D,
+/// across = f·lateral/D), cutting ~7 square roots per iteration down to 2.
 /// </summary>
 public sealed class GagongPredictionEngine
 {
     private const double SegmentBackExtension = 1000.0; // mod: p10 extended 1000 units behind
     private const int BisectionIterations = 20;
     private const double SlackTolerance = 1.0;
+    private const double HalfPi = Math.PI * 0.5;
 
     private readonly PredictionConfig _config;
 
@@ -52,12 +59,21 @@ public sealed class GagongPredictionEngine
         MovementState targetState,
         double hitboxRadius)
     {
-        if (skillshot.GetProjectileSpeed() is not double projectileSpeed)
+        // Single dispatch for all skillshot parameters (same values as the
+        // GetDelay/GetProjectileSpeed/GetMaxRange/GetEffectiveRadius extensions)
+        var (delay, projectileSpeed, range, halfWidth) = skillshot.Match(
+            linear: l => ((double)l.Delay, (double)l.Speed, (double)l.Range, l.Width / 2.0),
+            circular: c => ((double)c.Delay, (double)c.Speed, (double)c.Range, (double)c.Radius),
+            cone: c => ((double)c.Delay, 0.0, (double)c.Range, 0.0),
+            arc: a => ((double)a.Delay, (double)a.Speed, (double)a.OuterRadius, a.Width / 2.0),
+            rectangle: r => ((double)r.Delay, (double)r.Speed, (double)r.Range, r.Width / 2.0),
+            vectorRectangle: v => ((double)v.Delay, (double)v.Speed, (double)(v.Range + v.MaxLength), v.Width / 2.0));
+
+        if (projectileSpeed <= 0)
             return new PredictionResult.Unreachable("Gagong supports projectile skillshots only");
 
-        var range = skillshot.GetMaxRange();
-        var effectiveDelay = skillshot.GetDelay() + _config.NetworkCompensationDelay;
-        var width = skillshot.GetEffectiveRadius(hitboxRadius); // full lateral reach (input.width)
+        var effectiveDelay = delay + _config.NetworkCompensationDelay;
+        var width = halfWidth + hitboxRadius; // full lateral reach (input.width)
 
         var targetPosition = targetState.GetPosition();
         var targetVelocity = targetState.GetVelocity();
@@ -76,11 +92,9 @@ public sealed class GagongPredictionEngine
                 ComputeConfidence(casterPosition, targetPosition, 0, projectileSpeed));
         }
 
-        // Build the waypoint list: Pathing maps directly; straight-line movers get
-        // a synthetic two-point path long enough to cover the prediction horizon
-        IReadOnlyList<Point2D> waypoints;
-        int index;
-        Point2D serverPosition;
+        Point2D interceptPosition;
+        Point2D segmentStart;
+        Point2D segmentEnd;
 
         if (targetState is MovementState.Pathing pathing && pathing.Waypoints.Count >= 1)
         {
@@ -92,37 +106,64 @@ public sealed class GagongPredictionEngine
                     new MovementState.Idle(pathing.Waypoints[^1]), hitboxRadius);
             }
 
-            waypoints = pathing.Waypoints;
-            index = Math.Max(1, pathing.CurrentIndex); // Lua: path.index == 0 and 1 or path.index
-            serverPosition = targetPosition;
+            var waypoints = pathing.Waypoints;
+            var index = Math.Max(1, pathing.CurrentIndex); // Lua: path.index == 0 and 1 or path.index
+
+            var projected = Project(
+                casterPosition, waypoints, targetPosition, index, effectiveDelay,
+                projectileSpeed, targetSpeed);
+
+            if (projected.EndOfPath)
+                return EndOfPathFallback(
+                    casterPosition, waypoints[^1], range, effectiveDelay, projectileSpeed, targetSpeed);
+
+            interceptPosition = projected.Point;
+            segmentStart = waypoints[projected.SegmentEndIndex - 1];
+            segmentEnd = waypoints[projected.SegmentEndIndex];
         }
         else
         {
-            var horizon = targetSpeed * (_config.MaxPredictionTime + 1.0);
-            waypoints = new[] { targetPosition, targetPosition + targetVelocity.Normalize().ScaleBy(horizon) };
-            index = 1;
-            serverPosition = targetPosition;
-        }
+            // Straight-line fast path: equivalent to the synthetic two-point
+            // waypoint walk, with no array, list dispatch, or normalization.
+            // Virtual start = position at launch; v = the velocity itself.
+            var launch = targetPosition + targetVelocity.ScaleBy(effectiveDelay);
+            var kx = launch.X - casterPosition.X;
+            var ky = launch.Y - casterPosition.Y;
+            var vx = targetVelocity.X;
+            var vy = targetVelocity.Y;
 
-        var projected = Project(
-            casterPosition, waypoints, serverPosition, index, effectiveDelay, projectileSpeed, targetSpeed);
+            var a = targetSpeed * targetSpeed - projectileSpeed * projectileSpeed;
+            var b = 2.0 * (vx * kx + vy * ky);
+            var maxT = _config.MaxPredictionTime + 1.0 - effectiveDelay;
 
-        if (projected.EndOfPath)
-        {
-            // Lua fallback: cast at the last waypoint
-            var endPoint = waypoints[^1];
-            var endDistance = casterPosition.DistanceTo(endPoint);
-            if (endDistance > range)
-                return new PredictionResult.OutOfRange(endDistance, range);
+            double? interceptTime = null;
+            if (Math.Abs(a) > 1e-9)
+            {
+                var discriminant = b * b - 4.0 * a * (kx * kx + ky * ky);
+                if (discriminant > 0)
+                    interceptTime = (-b - Math.Sqrt(discriminant)) / (2.0 * a);
+            }
+            else if (Math.Abs(b) > 1e-9)
+            {
+                interceptTime = -(kx * kx + ky * ky) / b;
+            }
 
-            return new PredictionResult.Hit(
-                effectiveDelay + endDistance / projectileSpeed, endPoint, endPoint,
-                ComputeConfidence(casterPosition, endPoint, targetSpeed, projectileSpeed));
+            if (interceptTime is not double t || t < 0 || t > maxT)
+            {
+                // End of the synthetic horizon: cast at the far point
+                var horizonEnd = targetPosition + targetVelocity.ScaleBy(_config.MaxPredictionTime + 1.0);
+                return EndOfPathFallback(
+                    casterPosition, horizonEnd, range, effectiveDelay, projectileSpeed, targetSpeed);
+            }
+
+            interceptPosition = launch + targetVelocity.ScaleBy(t);
+            segmentStart = targetPosition;
+            segmentEnd = targetPosition + targetVelocity.ScaleBy(_config.MaxPredictionTime + 1.0);
         }
 
         // Width-exploiting refinement (mod): pull the hit earlier along the path
         var (aimPoint, targetAt, flightDistance) = Refine(
-            casterPosition, projected.Point, waypoints, projected.SegmentEndIndex,
+            casterPosition, interceptPosition, segmentStart, segmentEnd,
             projectileSpeed, targetSpeed, width);
 
         var aimDistance = casterPosition.DistanceTo(aimPoint);
@@ -134,6 +175,23 @@ public sealed class GagongPredictionEngine
             aimPoint,
             targetAt,
             ComputeConfidence(casterPosition, aimPoint, targetSpeed, projectileSpeed));
+    }
+
+    private static PredictionResult EndOfPathFallback(
+        Point2D casterPosition,
+        Point2D endPoint,
+        double range,
+        double effectiveDelay,
+        double projectileSpeed,
+        double targetSpeed)
+    {
+        var endDistance = casterPosition.DistanceTo(endPoint);
+        if (endDistance > range)
+            return new PredictionResult.OutOfRange(endDistance, range);
+
+        return new PredictionResult.Hit(
+            effectiveDelay + endDistance / projectileSpeed, endPoint, endPoint,
+            ComputeConfidence(casterPosition, endPoint, targetSpeed, projectileSpeed));
     }
 
     /// <summary>
@@ -224,32 +282,48 @@ public sealed class GagongPredictionEngine
     }
 
     /// <summary>
-    /// Port of <c>mod</c>: bisects how much projectile flight can be shaved off
-    /// (trial in [-width, 0]) while the width-graze construction stays feasible,
-    /// converging to ~1 unit of slack. Returns the refined aim point, the
-    /// target's position at that earlier contact, and the flight distance.
+    /// Port of <c>mod</c>/<c>mod_single</c>: bisects how much projectile flight
+    /// can be shaved off (trial in [-width, 0]) while the width-graze
+    /// construction stays feasible, converging to ~1 unit of slack. The loop
+    /// body runs on scalars; the circle-circle intersection is reduced through
+    /// the right-angle property of the tangent-length construction
+    /// (along = flight²/D, across = flight·lateral/D - algebraically identical
+    /// to the general intersection for this configuration).
     /// </summary>
     private static (Point2D Aim, Point2D TargetAt, double FlightDistance) Refine(
         Point2D source,
         Point2D interceptPosition,
-        IReadOnlyList<Point2D> waypoints,
-        int segmentEndIndex,
+        Point2D segmentStart,
+        Point2D segmentEnd,
         double v1,
         double v2,
         double width)
     {
-        var flightDistance = source.DistanceTo(interceptPosition);
-        var segmentStart = waypoints[segmentEndIndex - 1];
-        var segmentEnd = waypoints[segmentEndIndex];
+        var baseFlight = source.DistanceTo(interceptPosition);
         var segmentLength = segmentStart.DistanceTo(segmentEnd);
         if (segmentLength < 1e-6)
-            return (interceptPosition, interceptPosition, flightDistance);
+            return (interceptPosition, interceptPosition, baseFlight);
 
         // Lua: p10 = p10:lerp(p11, -1000/len) - extend well behind the segment
         var extendedStart = Lerp(segmentStart, segmentEnd, -SegmentBackExtension / segmentLength);
-        var d = interceptPosition.DistanceTo(extendedStart);
+        var ex = extendedStart.X;
+        var ey = extendedStart.Y;
+
+        var sx = source.X;
+        var sy = source.Y;
+        var ix = interceptPosition.X;
+        var iy = interceptPosition.Y;
+
+        var dx = ex - ix;
+        var dy = ey - iy;
+        var d = Math.Sqrt(dx * dx + dy * dy);
         if (d < 1e-6)
-            return (interceptPosition, interceptPosition, flightDistance);
+            return (interceptPosition, interceptPosition, baseFlight);
+
+        // Unit back-direction along the path (toward the extended start)
+        var ubx = dx / d;
+        var uby = dy / d;
+        var widthSq = width * width;
 
         var aim = interceptPosition;
         var targetAt = interceptPosition;
@@ -260,13 +334,102 @@ public sealed class GagongPredictionEngine
         for (var i = 0; i < BisectionIterations && slack > SlackTolerance; i++)
         {
             var trial = (feasible + infeasible) * 0.5;
-            var candidate = RefineSingle(
-                source, interceptPosition, extendedStart, d, flightDistance, trial, v1, v2, width);
 
-            if (candidate is var (point, earlierTarget, candidateSlack) && candidate is not null)
+            // l = target position if intercepted |trial| units of flight earlier
+            var back = -trial * v2 / v1;
+            var lx = ix + ubx * back;
+            var ly = iy + uby * back;
+
+            var flight = baseFlight + trial;
+            if (flight <= 1e-6)
             {
-                aim = point;
-                targetAt = earlierTarget;
+                infeasible = trial;
+                continue;
+            }
+
+            var dlx = lx - sx;
+            var dly = ly - sy;
+            var distSq = dlx * dlx + dly * dly;
+            var offsetSq = distSq - flight * flight;
+            if (offsetSq < 0 || offsetSq > widthSq)
+            {
+                infeasible = trial;
+                continue;
+            }
+
+            var lateral = Math.Sqrt(offsetSq);
+            var centerDistance = Math.Sqrt(distSq);
+            if (centerDistance < 1e-9)
+            {
+                infeasible = trial;
+                continue;
+            }
+
+            // Reduced circle-circle: |X - source| = flight, |X - l| = lateral,
+            // right angle at X => along = flight²/D, across = flight·lateral/D
+            var along = flight * flight / centerDistance;
+            var across = flight * lateral / centerDistance;
+            var invD = 1.0 / centerDistance;
+            var mx = sx + dlx * along * invD;
+            var my = sy + dly * along * invD;
+            var px = -dly * invD;
+            var py = dlx * invD;
+
+            var c1x = mx + px * across;
+            var c1y = my + py * across;
+            var c2x = mx - px * across;
+            var c2y = my - py * across;
+
+            // Rear-side pick: the intersection closer to the (extended) segment start
+            var d1x = c1x - ex;
+            var d1y = c1y - ey;
+            var d2x = c2x - ex;
+            var d2y = c2y - ey;
+            double cx, cy;
+            if (d1x * d1x + d1y * d1y < d2x * d2x + d2y * d2y)
+            {
+                cx = c1x;
+                cy = c1y;
+            }
+            else
+            {
+                cx = c2x;
+                cy = c2y;
+            }
+
+            // Intersection of the aim ray (source -> c) with the path line
+            var rax = cx - sx;
+            var ray = cy - sy;
+            var rbx = lx - ex;
+            var rby = ly - ey;
+            var denominator = rax * rby - ray * rbx;
+            if (Math.Abs(denominator) < 1e-9)
+            {
+                infeasible = trial;
+                continue;
+            }
+
+            var s = ((ex - sx) * rby - (ey - sy) * rbx) / denominator;
+            var cpx = sx + rax * s;
+            var cpy = sy + ray * s;
+
+            // Angle-scaled usable width: a triangle peaking at full width when the
+            // ray is perpendicular to the path (Lua's pa/halfPi scaling, verbatim)
+            var ux = sx - cpx;
+            var uy = sy - cpy;
+            var wx = lx - cpx;
+            var wy = ly - cpy;
+            var angle = Math.Abs(Math.Atan2(ux * wy - uy * wx, ux * wx + uy * wy));
+
+            var usableWidth = angle <= HalfPi
+                ? angle / HalfPi * width
+                : (1 - (angle - HalfPi) / HalfPi) * width;
+
+            var candidateSlack = usableWidth - lateral;
+            if (candidateSlack < usableWidth && candidateSlack > 0)
+            {
+                aim = new Point2D(cx, cy);
+                targetAt = new Point2D(lx, ly);
                 feasible = trial;
                 slack = candidateSlack;
             }
@@ -276,70 +439,7 @@ public sealed class GagongPredictionEngine
             }
         }
 
-        return (aim, targetAt, source.DistanceTo(interceptPosition) + feasible);
-    }
-
-    /// <summary>
-    /// Port of <c>mod_single</c>: tests whether shaving <paramref name="trial"/>
-    /// units of projectile flight still hits. The target's earlier position l is
-    /// found by walking back along the path; the aim point is the circle-circle
-    /// intersection where the ray from the caster passes the target at lateral
-    /// offset sqrt(r2), taking the rear-side solution; feasibility requires the
-    /// offset to fit within the angle-scaled usable width.
-    /// </summary>
-    private static (Point2D Aim, Point2D TargetAt, double Slack)? RefineSingle(
-        Point2D source,
-        Point2D interceptPosition,
-        Point2D extendedStart,
-        double d,
-        double interceptDistance,
-        double trial,
-        double v1,
-        double v2,
-        double width)
-    {
-        // l = target position if intercepted |trial| units of flight earlier
-        var earlierTarget = Lerp(interceptPosition, extendedStart, -trial / v1 * v2 / d);
-        var flight = interceptDistance + trial;
-        if (flight <= 1e-6)
-            return null;
-
-        var offsetSq = source.DistanceTo(earlierTarget) * source.DistanceTo(earlierTarget) - flight * flight;
-        if (offsetSq < 0 || offsetSq > width * width)
-            return null;
-
-        var lateralOffset = Math.Sqrt(offsetSq);
-        if (CircleCircleIntersection(source, flight, earlierTarget, lateralOffset)
-                is not var (candidate1, candidate2))
-            return null;
-
-        // Rear-side pick: the intersection closer to the (extended) segment start
-        var aim = candidate1.DistanceTo(extendedStart) * candidate1.DistanceTo(extendedStart)
-                < candidate2.DistanceTo(extendedStart) * candidate2.DistanceTo(extendedStart)
-            ? candidate1
-            : candidate2;
-
-        if (LineLineIntersection(source, aim, extendedStart, earlierTarget) is not Point2D crossing)
-            return null;
-
-        // Angle-scaled usable width: a triangle peaking at full width when the
-        // ray is perpendicular to the path (Lua's pa/halfPi scaling, verbatim)
-        var toSource = source - crossing;
-        var toTarget = earlierTarget - crossing;
-        var angle = Math.Abs(Math.Atan2(
-            toSource.X * toTarget.Y - toSource.Y * toTarget.X,
-            toSource.DotProduct(toTarget)));
-
-        var halfPi = Math.PI * 0.5;
-        var usableWidth = angle <= halfPi
-            ? angle / halfPi * width
-            : (1 - (angle - halfPi) / halfPi) * width;
-
-        var slack = usableWidth - lateralOffset;
-        if (slack < usableWidth && slack > 0)
-            return (aim, earlierTarget, slack);
-
-        return null;
+        return (aim, targetAt, baseFlight + feasible);
     }
 
     private static double ComputeConfidence(
@@ -353,36 +453,4 @@ public sealed class GagongPredictionEngine
 
     private static Point2D Lerp(Point2D from, Point2D to, double fraction) =>
         from + (to - from).ScaleBy(fraction);
-
-    private static (Point2D, Point2D)? CircleCircleIntersection(
-        Point2D center0, double radius0, Point2D center1, double radius1)
-    {
-        var distance = center0.DistanceTo(center1);
-        if (distance < 1e-9 || distance > radius0 + radius1 || distance < Math.Abs(radius0 - radius1))
-            return null;
-
-        var along = (radius0 * radius0 - radius1 * radius1 + distance * distance) / (2 * distance);
-        var acrossSq = radius0 * radius0 - along * along;
-        if (acrossSq < 0)
-            return null;
-
-        var across = Math.Sqrt(acrossSq);
-        var direction = (center1 - center0).Normalize();
-        var mid = center0 + direction.ScaleBy(along);
-        var perpendicular = new Vector2D(-direction.Y, direction.X);
-
-        return (mid + perpendicular.ScaleBy(across), mid - perpendicular.ScaleBy(across));
-    }
-
-    private static Point2D? LineLineIntersection(Point2D a1, Point2D a2, Point2D b1, Point2D b2)
-    {
-        var directionA = a2 - a1;
-        var directionB = b2 - b1;
-        var denominator = directionA.X * directionB.Y - directionA.Y * directionB.X;
-        if (Math.Abs(denominator) < 1e-9)
-            return null;
-
-        var s = ((b1.X - a1.X) * directionB.Y - (b1.Y - a1.Y) * directionB.X) / denominator;
-        return a1 + directionA.ScaleBy(s);
-    }
 }

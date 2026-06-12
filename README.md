@@ -46,7 +46,7 @@ dotnet run --project Samaritan.Simulation
 | R | Reset current scenario |
 | Left / Right | Previous / next scenario |
 | + / - | Simulation speed (0.25x - 4x) |
-| **M** | Cycle prediction method: AFTER (rear graze) / NEAREST (tangent) / OPTIMAL (fast rear) / GAGONG (lua port) |
+| **M** | Cycle prediction method: AFTER (exact rear) / NEAREST (tangent) / OPTIMAL (fast rear) / GAGONG (lua port) |
 | Esc | Exit |
 | Mouse drag | Yellow handles move the caster / target start; the green handle sets the target's movement direction |
 
@@ -58,7 +58,7 @@ flight versus the effective radius, i.e. how far the shot is from the tangency b
 
 | Mode | Goal | Behavior |
 |---|---|---|
-| `RearGraze` (default) | Dodge resistance | Aims behind the target along its path so the missile grazes the rear edge (~5% penetration). A target that keeps moving is clipped from behind; one that stops gets hit center-mass. |
+| `RearGraze` (default) | Exact-time rear contact | First contact at the exact (minimal) interception time, with the touch point swung toward the rear rim - rear-ness at zero time cost, using the flat region around the time minimum. Falls back to the rear-edge tangency graze. |
 | `NearestRear` | Most tangent hit | Searches the missile ray angle directly for a closest approach of `R*(1 - eps)` in the actual-cast frame - the simulated "HIT by x" margin is ~0.3 units at any geometry where a tangent graze is reachable. |
 | `Optimal` | Smallest interception time, still from behind | Among rays whose pass lands on the rear half of the hitbox and penetrates no deeper than the target's bounding radius, picks the earliest first contact and casts at the contact point itself. |
 
@@ -67,8 +67,9 @@ constraint set is empty. Placed effects (circular, rectangle, vector) always cen
 detonation on the predicted target position instead.
 
 The simulation additionally offers **GAGONG**, a faithful port of a community Lua
-prediction routine, kept as a comparison reference. Benchmarks (Nidalee Q, per call,
-caching disabled): RearGraze ~150 ns, NearestRear ~260 ns, Gagong ~370 ns,
+prediction routine, kept as a comparison reference; its hot path is scalarized and
+allocation-free (behavior pinned by golden-value tests). Benchmarks (Nidalee Q, per
+call, caching disabled): Gagong ~160 ns, NearestRear ~260 ns, RearGraze ~420 ns,
 Optimal ~2.8 us.
 
 ## Algorithm

@@ -189,9 +189,12 @@ public sealed class PredictionEngine : IPredictionEngine
                         ?? SolveTrailingEdgeInterception(
                             casterPosition, targetPosition, targetVelocity, effectiveRadius,
                             movingSolverSpeed, effectiveDelay, RearGrazeMargin, 0),
-                    _ => SolveTrailingEdgeInterception(
-                        casterPosition, targetPosition, targetVelocity, effectiveRadius,
-                        movingSolverSpeed, effectiveDelay, RearGrazeMargin, 0)
+                    _ => SolveExactTimeRearInterception(
+                            casterPosition, targetPosition, targetVelocity, effectiveRadius,
+                            movingSolverSpeed, effectiveDelay, _config.NetworkCompensationDelay)
+                        ?? SolveTrailingEdgeInterception(
+                            casterPosition, targetPosition, targetVelocity, effectiveRadius,
+                            movingSolverSpeed, effectiveDelay, RearGrazeMargin, 0)
                 };
 
             if (movingResult.HasValue)
@@ -593,6 +596,94 @@ public sealed class PredictionEngine : IPredictionEngine
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// Solves the default (rear-at-exact-time) aim: the missile's first contact
+    /// happens at the EXACT method's minimal interception time, with the contact
+    /// point swung toward the rear rim of the hitbox. Contact time as a function
+    /// of ray angle is flat around its minimum, so the rear swing is free: the
+    /// launch cushion (the prediction budgets network compensation that the
+    /// actual cast does not wait for) advances the front by p·netComp units,
+    /// which rotates the touch point around the rim at zero time cost.
+    /// Construction: solve the centered interception for T_exact, then intersect
+    /// the front-travel circle (radius p·(T_exact - rawDelay) around the caster)
+    /// with the hitbox rim (radius R around the center at T_exact) and take the
+    /// rear-side point; verify the touch is the FIRST contact on that ray.
+    /// Returns null when the construction degenerates (caller falls back to the
+    /// rear-graze tangency).
+    /// </summary>
+    private static (double Time, Point2D AimPoint)? SolveExactTimeRearInterception(
+        Point2D casterPosition,
+        Point2D targetPosition,
+        Vector2D targetVelocity,
+        double effectiveRadius,
+        double projectileSpeed,
+        double effectiveDelay,
+        double networkCompensation)
+    {
+        var exact = SolveCenteredInterception(
+            casterPosition, targetPosition, targetVelocity, effectiveRadius, projectileSpeed, effectiveDelay);
+        if (exact is null)
+            return null;
+
+        var exactTime = exact.Value.Time;
+        var center = targetPosition + targetVelocity.ScaleBy(exactTime);
+        var toCenter = center - casterPosition;
+        var centerDistance = toCenter.Length;
+
+        // Caster effectively inside the hitbox - aim at the body
+        if (centerDistance <= effectiveRadius || centerDistance < 1e-9)
+            return (exactTime, center);
+
+        // Front travel by the exact moment in the actual-cast frame (raw delay):
+        // the cushion pushes it past the solver-frame near edge, which is what
+        // swings the rim touch toward the rear
+        var rawDelay = Math.Max(0, effectiveDelay - networkCompensation);
+        var frontDistance = Math.Clamp(
+            projectileSpeed * (exactTime - rawDelay),
+            centerDistance - effectiveRadius,
+            centerDistance + effectiveRadius);
+
+        // Circle-circle intersection: |X - caster| = frontDistance, |X - center| = R
+        var cosAtCaster = (frontDistance * frontDistance + centerDistance * centerDistance
+                         - effectiveRadius * effectiveRadius) / (2 * frontDistance * centerDistance);
+        cosAtCaster = Math.Clamp(cosAtCaster, -1.0, 1.0);
+
+        var baseAngle = Math.Atan2(toCenter.Y, toCenter.X);
+        var halfAngle = Math.Acos(cosAtCaster);
+
+        var candidate1 = casterPosition + new Vector2D(
+            Math.Cos(baseAngle + halfAngle), Math.Sin(baseAngle + halfAngle)).ScaleBy(frontDistance);
+        var candidate2 = casterPosition + new Vector2D(
+            Math.Cos(baseAngle - halfAngle), Math.Sin(baseAngle - halfAngle)).ScaleBy(frontDistance);
+
+        // Rear rim: the candidate behind the center relative to the movement direction
+        var aimPoint = (candidate1 - center).DotProduct(targetVelocity)
+                     <= (candidate2 - center).DotProduct(targetVelocity)
+            ? candidate1
+            : candidate2;
+
+        // The rim touch must be the FIRST contact on this ray (entry crossing),
+        // otherwise the actual hit would land earlier than the exact time
+        var toAim = aimPoint - casterPosition;
+        if (toAim.Length < 1e-9)
+            return null;
+
+        var ray = toAim.Normalize();
+        var relativeVelocity = targetVelocity - ray.ScaleBy(projectileSpeed);
+        var launchOffset = (targetPosition - casterPosition) + targetVelocity.ScaleBy(rawDelay);
+        var firstContact = MinRootAtOrAfter(
+            relativeVelocity.DotProduct(relativeVelocity),
+            2.0 * launchOffset.DotProduct(relativeVelocity),
+            launchOffset.DotProduct(launchOffset) - effectiveRadius * effectiveRadius,
+            0);
+
+        var touchFlight = exactTime - rawDelay;
+        if (firstContact is not double contactFlight || contactFlight < touchFlight - 1e-3)
+            return null;
+
+        return (exactTime, aimPoint);
     }
 
     /// <summary>

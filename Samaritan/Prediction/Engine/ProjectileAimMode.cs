@@ -7,9 +7,12 @@ namespace Samaritan.Prediction.Engine;
 public enum ProjectileAimMode
 {
     /// <summary>
-    /// Aim behind the target so the missile tangentially grazes the rear edge of
-    /// the hitbox: the latest possible contact, most resistant to direction
-    /// changes. The default.
+    /// The default: first contact at the EXACT (minimal) interception time, with
+    /// the contact point swung toward the rear rim of the hitbox. Contact time is
+    /// flat around its minimum over ray angles, so the rear swing - powered by
+    /// the launch cushion (network compensation budgeted by the prediction but
+    /// not waited for by the actual cast) - costs zero time. Falls back to the
+    /// rear-edge tangency graze when the construction degenerates.
     /// </summary>
     RearGraze,
 

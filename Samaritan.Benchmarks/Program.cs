@@ -2,4 +2,4 @@ using BenchmarkDotNet.Running;
 
 using Samaritan.Benchmarks;
 
-BenchmarkRunner.Run<PredictionBenchmarks>();
+BenchmarkSwitcher.FromAssembly(typeof(PredictionBenchmarks).Assembly).Run(args);
