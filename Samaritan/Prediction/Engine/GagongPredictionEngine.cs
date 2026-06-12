@@ -1,5 +1,6 @@
 namespace Samaritan.Prediction.Engine;
 
+using MathNet.Numerics;
 using MathNet.Spatial.Euclidean;
 
 using Samaritan.Prediction.Configuration;
@@ -27,11 +28,12 @@ using Samaritan.Prediction.Results;
 /// extension. Fixed relative to the source: the undefined second return value
 /// (`p2`) and missing range/degenerate-input guards.
 ///
-/// Performance notes (behavior-identical, pinned by golden-value tests):
-/// straight-line movers take an allocation-free fast path; the refinement loop
-/// runs on scalars with the circle-circle intersection reduced via the
-/// right-angle property of the tangent-length construction (along = f²/D,
-/// across = f·lateral/D), cutting ~7 square roots per iteration down to 2.
+/// Implemented on MathNet.Spatial primitives (Point2D / Vector2D / Line2D) and
+/// MathNet.Numerics (FindRoots) throughout, while keeping the fast structure
+/// (behavior pinned by golden-value tests): straight-line movers take an
+/// allocation-free fast path, and the refinement loop uses the circle-circle
+/// intersection reduced via the right-angle property of the tangent-length
+/// construction (along = f²/D, across = f·lateral/D).
 /// </summary>
 public sealed class GagongPredictionEngine
 {
@@ -124,31 +126,19 @@ public sealed class GagongPredictionEngine
         else
         {
             // Straight-line fast path: equivalent to the synthetic two-point
-            // waypoint walk, with no array, list dispatch, or normalization.
-            // Virtual start = position at launch; v = the velocity itself.
+            // waypoint walk, with no array or list dispatch. Virtual start =
+            // position at launch; the segment velocity is the velocity itself.
             var launch = targetPosition + targetVelocity.ScaleBy(effectiveDelay);
-            var kx = launch.X - casterPosition.X;
-            var ky = launch.Y - casterPosition.Y;
-            var vx = targetVelocity.X;
-            var vy = targetVelocity.Y;
+            var launchOffset = launch - casterPosition;
 
-            var a = targetSpeed * targetSpeed - projectileSpeed * projectileSpeed;
-            var b = 2.0 * (vx * kx + vy * ky);
+            var quadA = targetVelocity.DotProduct(targetVelocity) - projectileSpeed * projectileSpeed;
+            var quadB = 2.0 * targetVelocity.DotProduct(launchOffset);
+            var quadC = launchOffset.DotProduct(launchOffset);
             var maxT = _config.MaxPredictionTime + 1.0 - effectiveDelay;
 
-            double? interceptTime = null;
-            if (Math.Abs(a) > 1e-9)
-            {
-                var discriminant = b * b - 4.0 * a * (kx * kx + ky * ky);
-                if (discriminant > 0)
-                    interceptTime = (-b - Math.Sqrt(discriminant)) / (2.0 * a);
-            }
-            else if (Math.Abs(b) > 1e-9)
-            {
-                interceptTime = -(kx * kx + ky * ky) / b;
-            }
-
-            if (interceptTime is not double t || t < 0 || t > maxT)
+            if (SolveGagongQuadratic(quadA, quadB, quadC) is not double interceptTime
+                || interceptTime < 0
+                || interceptTime > maxT)
             {
                 // End of the synthetic horizon: cast at the far point
                 var horizonEnd = targetPosition + targetVelocity.ScaleBy(_config.MaxPredictionTime + 1.0);
@@ -156,7 +146,7 @@ public sealed class GagongPredictionEngine
                     casterPosition, horizonEnd, range, effectiveDelay, projectileSpeed, targetSpeed);
             }
 
-            interceptPosition = launch + targetVelocity.ScaleBy(t);
+            interceptPosition = launch + targetVelocity.ScaleBy(interceptTime);
             segmentStart = targetPosition;
             segmentEnd = targetPosition + targetVelocity.ScaleBy(_config.MaxPredictionTime + 1.0);
         }
@@ -195,6 +185,32 @@ public sealed class GagongPredictionEngine
     }
 
     /// <summary>
+    /// Solves a·t² + b·t + c = 0 with the Lua port's root choice
+    /// (-b - sqrt(d))/(2a) via MathNet.Numerics: the larger real root when the
+    /// target is slower than the projectile (a &lt; 0), the smaller one when
+    /// faster. The original requires a strictly positive discriminant; the
+    /// degenerate a ≈ 0 case (equal speeds) collapses to the linear solution.
+    /// </summary>
+    private static double? SolveGagongQuadratic(double a, double b, double c)
+    {
+        if (Math.Abs(a) > 1e-9)
+        {
+            if (b * b - 4.0 * a * c <= 0)
+                return null;
+
+            var (root1, root2) = FindRoots.Quadratic(c, b, a);
+            return a < 0
+                ? Math.Max(root1.Real, root2.Real)
+                : Math.Min(root1.Real, root2.Real);
+        }
+
+        if (Math.Abs(b) > 1e-9)
+            return -c / b;
+
+        return null;
+    }
+
+    /// <summary>
     /// Port of <c>mathf.project</c>: solves |D + v·t| = v1·t for a target walking
     /// from segmentStart toward segmentEnd at speed v2. No delay or hitbox terms.
     /// </summary>
@@ -207,25 +223,14 @@ public sealed class GagongPredictionEngine
             return null;
 
         var v = segment.Normalize().ScaleBy(v2);
-        var a = v.DotProduct(v) - v1 * v1;
-        var b = 2.0 * v.DotProduct(k);
+        var quadA = v.DotProduct(v) - v1 * v1;
+        var quadB = 2.0 * v.DotProduct(k);
+        var quadC = k.DotProduct(k);
 
-        if (Math.Abs(a) > 1e-9)
-        {
-            var d = b * b - 4.0 * a * k.DotProduct(k);
-            if (d > 0)
-            {
-                var t = (-b - Math.Sqrt(d)) / (2.0 * a);
-                return (segmentStart + v.ScaleBy(t), t);
-            }
-        }
-        else if (Math.Abs(b) > 1e-9)
-        {
-            var t = -k.DotProduct(k) / b;
-            return (segmentStart + v.ScaleBy(t), t);
-        }
+        if (SolveGagongQuadratic(quadA, quadB, quadC) is not double t)
+            return null;
 
-        return null;
+        return (segmentStart + v.ScaleBy(t), t);
     }
 
     /// <summary>
@@ -284,11 +289,11 @@ public sealed class GagongPredictionEngine
     /// <summary>
     /// Port of <c>mod</c>/<c>mod_single</c>: bisects how much projectile flight
     /// can be shaved off (trial in [-width, 0]) while the width-graze
-    /// construction stays feasible, converging to ~1 unit of slack. The loop
-    /// body runs on scalars; the circle-circle intersection is reduced through
-    /// the right-angle property of the tangent-length construction
-    /// (along = flight²/D, across = flight·lateral/D - algebraically identical
-    /// to the general intersection for this configuration).
+    /// construction stays feasible, converging to ~1 unit of slack. The
+    /// circle-circle intersection is reduced through the right-angle property of
+    /// the tangent-length construction (along = flight²/D, across =
+    /// flight·lateral/D - algebraically identical to the general intersection
+    /// for this configuration); the ray/path crossing uses MathNet's Line2D.
     /// </summary>
     private static (Point2D Aim, Point2D TargetAt, double FlightDistance) Refine(
         Point2D source,
@@ -306,23 +311,13 @@ public sealed class GagongPredictionEngine
 
         // Lua: p10 = p10:lerp(p11, -1000/len) - extend well behind the segment
         var extendedStart = Lerp(segmentStart, segmentEnd, -SegmentBackExtension / segmentLength);
-        var ex = extendedStart.X;
-        var ey = extendedStart.Y;
-
-        var sx = source.X;
-        var sy = source.Y;
-        var ix = interceptPosition.X;
-        var iy = interceptPosition.Y;
-
-        var dx = ex - ix;
-        var dy = ey - iy;
-        var d = Math.Sqrt(dx * dx + dy * dy);
-        if (d < 1e-6)
+        var toExtended = extendedStart - interceptPosition;
+        var extendedDistance = toExtended.Length;
+        if (extendedDistance < 1e-6)
             return (interceptPosition, interceptPosition, baseFlight);
 
         // Unit back-direction along the path (toward the extended start)
-        var ubx = dx / d;
-        var uby = dy / d;
+        var backDirection = toExtended.ScaleBy(1.0 / extendedDistance);
         var widthSq = width * width;
 
         var aim = interceptPosition;
@@ -336,10 +331,7 @@ public sealed class GagongPredictionEngine
             var trial = (feasible + infeasible) * 0.5;
 
             // l = target position if intercepted |trial| units of flight earlier
-            var back = -trial * v2 / v1;
-            var lx = ix + ubx * back;
-            var ly = iy + uby * back;
-
+            var earlierTarget = interceptPosition + backDirection.ScaleBy(-trial * v2 / v1);
             var flight = baseFlight + trial;
             if (flight <= 1e-6)
             {
@@ -347,10 +339,9 @@ public sealed class GagongPredictionEngine
                 continue;
             }
 
-            var dlx = lx - sx;
-            var dly = ly - sy;
-            var distSq = dlx * dlx + dly * dly;
-            var offsetSq = distSq - flight * flight;
+            var toTarget = earlierTarget - source;
+            var distanceSq = toTarget.DotProduct(toTarget);
+            var offsetSq = distanceSq - flight * flight;
             if (offsetSq < 0 || offsetSq > widthSq)
             {
                 infeasible = trial;
@@ -358,7 +349,7 @@ public sealed class GagongPredictionEngine
             }
 
             var lateral = Math.Sqrt(offsetSq);
-            var centerDistance = Math.Sqrt(distSq);
+            var centerDistance = Math.Sqrt(distanceSq);
             if (centerDistance < 1e-9)
             {
                 infeasible = trial;
@@ -367,59 +358,42 @@ public sealed class GagongPredictionEngine
 
             // Reduced circle-circle: |X - source| = flight, |X - l| = lateral,
             // right angle at X => along = flight²/D, across = flight·lateral/D
-            var along = flight * flight / centerDistance;
-            var across = flight * lateral / centerDistance;
-            var invD = 1.0 / centerDistance;
-            var mx = sx + dlx * along * invD;
-            var my = sy + dly * along * invD;
-            var px = -dly * invD;
-            var py = dlx * invD;
+            var direction = toTarget.ScaleBy(1.0 / centerDistance);
+            var perpendicular = new Vector2D(-direction.Y, direction.X);
+            var mid = source + direction.ScaleBy(flight * flight / centerDistance);
+            var chord = perpendicular.ScaleBy(flight * lateral / centerDistance);
 
-            var c1x = mx + px * across;
-            var c1y = my + py * across;
-            var c2x = mx - px * across;
-            var c2y = my - py * across;
+            var candidate1 = mid + chord;
+            var candidate2 = mid - chord;
 
             // Rear-side pick: the intersection closer to the (extended) segment start
-            var d1x = c1x - ex;
-            var d1y = c1y - ey;
-            var d2x = c2x - ex;
-            var d2y = c2y - ey;
-            double cx, cy;
-            if (d1x * d1x + d1y * d1y < d2x * d2x + d2y * d2y)
-            {
-                cx = c1x;
-                cy = c1y;
-            }
-            else
-            {
-                cx = c2x;
-                cy = c2y;
-            }
+            var offset1 = candidate1 - extendedStart;
+            var offset2 = candidate2 - extendedStart;
+            var aimCandidate = offset1.DotProduct(offset1) < offset2.DotProduct(offset2)
+                ? candidate1
+                : candidate2;
 
-            // Intersection of the aim ray (source -> c) with the path line
-            var rax = cx - sx;
-            var ray = cy - sy;
-            var rbx = lx - ex;
-            var rby = ly - ey;
-            var denominator = rax * rby - ray * rbx;
-            if (Math.Abs(denominator) < 1e-9)
+            // Intersection of the aim ray with the path line (infinite lines)
+            if (source.DistanceTo(aimCandidate) < 1e-9 || extendedStart.DistanceTo(earlierTarget) < 1e-9)
             {
                 infeasible = trial;
                 continue;
             }
 
-            var s = ((ex - sx) * rby - (ey - sy) * rbx) / denominator;
-            var cpx = sx + rax * s;
-            var cpy = sy + ray * s;
+            var crossing = new Line2D(source, aimCandidate)
+                .IntersectWith(new Line2D(extendedStart, earlierTarget));
+            if (crossing is not Point2D crossingPoint)
+            {
+                infeasible = trial;
+                continue;
+            }
 
             // Angle-scaled usable width: a triangle peaking at full width when the
             // ray is perpendicular to the path (Lua's pa/halfPi scaling, verbatim)
-            var ux = sx - cpx;
-            var uy = sy - cpy;
-            var wx = lx - cpx;
-            var wy = ly - cpy;
-            var angle = Math.Abs(Math.Atan2(ux * wy - uy * wx, ux * wx + uy * wy));
+            var toSource = source - crossingPoint;
+            var toEarlier = earlierTarget - crossingPoint;
+            var angle = Math.Abs(Math.Atan2(
+                toSource.CrossProduct(toEarlier), toSource.DotProduct(toEarlier)));
 
             var usableWidth = angle <= HalfPi
                 ? angle / HalfPi * width
@@ -428,8 +402,8 @@ public sealed class GagongPredictionEngine
             var candidateSlack = usableWidth - lateral;
             if (candidateSlack < usableWidth && candidateSlack > 0)
             {
-                aim = new Point2D(cx, cy);
-                targetAt = new Point2D(lx, ly);
+                aim = aimCandidate;
+                targetAt = earlierTarget;
                 feasible = trial;
                 slack = candidateSlack;
             }

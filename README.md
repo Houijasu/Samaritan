@@ -67,10 +67,10 @@ constraint set is empty. Placed effects (circular, rectangle, vector) always cen
 detonation on the predicted target position instead.
 
 The simulation additionally offers **GAGONG**, a faithful port of a community Lua
-prediction routine, kept as a comparison reference; its hot path is scalarized and
-allocation-free (behavior pinned by golden-value tests). Benchmarks (Nidalee Q, per
-call, caching disabled): Gagong ~160 ns, NearestRear ~260 ns, RearGraze ~420 ns,
-Optimal ~2.8 us.
+prediction routine, kept as a comparison reference; it is implemented on
+MathNet.Spatial/Numerics primitives with an allocation-free hot path (behavior pinned
+by golden-value tests). Benchmarks (Nidalee Q, per call, caching disabled):
+Gagong ~200 ns, NearestRear ~260 ns, RearGraze ~420 ns, Optimal ~2.8 us.
 
 ## Algorithm
 
