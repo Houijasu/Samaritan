@@ -3,6 +3,7 @@ namespace Samaritan.Prediction.Engine;
 using MathNet.Numerics;
 using MathNet.Spatial.Euclidean;
 
+using Samaritan.Prediction.Collision;
 using Samaritan.Prediction.Configuration;
 using Samaritan.Prediction.Movement;
 using Samaritan.Prediction.Results;
@@ -35,7 +36,7 @@ using Samaritan.Prediction.Results;
 /// intersection reduced via the right-angle property of the tangent-length
 /// construction (along = f²/D, across = f·lateral/D).
 /// </summary>
-public sealed class GagongPredictionEngine
+public sealed class GagongPredictionEngine : IPredictionEngine
 {
     private const double SegmentBackExtension = 1000.0; // mod: p10 extended 1000 units behind
     private const int BisectionIterations = 20;
@@ -43,6 +44,7 @@ public sealed class GagongPredictionEngine
     private const double HalfPi = Math.PI * 0.5;
 
     private readonly PredictionConfig _config;
+    private readonly CollisionValidationService _collisionService = new();
 
     /// <summary>
     /// Creates a Gagong prediction engine with the specified configuration.
@@ -55,11 +57,16 @@ public sealed class GagongPredictionEngine
     /// <summary>
     /// Predicts using the Gagong algorithm. Projectile skillshots only.
     /// </summary>
+    /// <param name="aimMode">
+    /// Ignored: Gagong is a faithful port of a single fixed algorithm and has
+    /// no aim modes. Accepted only to satisfy <see cref="IPredictionEngine"/>.
+    /// </param>
     public PredictionResult PredictFromState(
         Skillshot skillshot,
         Point2D casterPosition,
         MovementState targetState,
-        double hitboxRadius)
+        double hitboxRadius,
+        ProjectileAimMode aimMode = ProjectileAimMode.RearGraze)
     {
         // Single dispatch for all skillshot parameters (same values as the
         // GetDelay/GetProjectileSpeed/GetMaxRange/GetEffectiveRadius extensions)
@@ -165,6 +172,47 @@ public sealed class GagongPredictionEngine
             aimPoint,
             targetAt,
             ComputeConfidence(casterPosition, aimPoint, targetSpeed, projectileSpeed));
+    }
+
+    /// <inheritdoc />
+    public PredictionResult Predict(
+        Skillshot skillshot,
+        Point2D casterPosition,
+        MovementTracker target)
+    {
+        var state = target.CurrentState;
+        var hitboxRadius = target.HitboxRadius > 0 ? target.HitboxRadius : _config.DefaultHitboxRadius;
+
+        return PredictFromState(skillshot, casterPosition, state, hitboxRadius);
+    }
+
+    /// <inheritdoc />
+    public IReadOnlyList<PredictionResult> PredictMultiple(
+        Skillshot skillshot,
+        Point2D casterPosition,
+        IEnumerable<MovementTracker> targets)
+    {
+        return targets
+            .Select(t => Predict(skillshot, casterPosition, t))
+            .ToList();
+    }
+
+    /// <inheritdoc />
+    public bool ValidateHit(
+        Skillshot skillshot,
+        Point2D casterPosition,
+        Point2D aimPosition,
+        Point2D targetPosition,
+        double hitboxRadius,
+        double timeElapsed)
+    {
+        return _collisionService.ValidateHit(
+            skillshot,
+            casterPosition,
+            aimPosition,
+            targetPosition,
+            hitboxRadius,
+            timeElapsed);
     }
 
     private static PredictionResult EndOfPathFallback(

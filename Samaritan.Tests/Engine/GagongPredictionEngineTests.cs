@@ -88,6 +88,69 @@ public class GagongPredictionEngineTests
         Assert.IsType<PredictionResult.OutOfRange>(result);
     }
 
+    [Fact]
+    public void Engine_ImplementsIPredictionEngine()
+    {
+        Assert.IsAssignableFrom<IPredictionEngine>(new GagongPredictionEngine());
+    }
+
+    [Fact]
+    public void Predict_FromTrackedWalkingTarget_ReturnsHit()
+    {
+        var tracker = new MovementTracker { HitboxRadius = HitboxRadius };
+        tracker.Update(new Point2D(600, -200), gameTime: 0);
+        tracker.Update(new Point2D(600, -165), gameTime: 0.1); // walking +Y at 350 u/s
+
+        var result = new GagongPredictionEngine().Predict(NidaleeQ, Caster, tracker);
+        var hit = Assert.IsType<PredictionResult.Hit>(result);
+
+        Assert.True(hit.InterceptionTime > Delay, "Interception must happen after the cast delay");
+    }
+
+    [Fact]
+    public void PredictMultiple_ReturnsOneResultPerTarget()
+    {
+        var trackers = new[]
+        {
+            new MovementTracker { HitboxRadius = HitboxRadius },
+            new MovementTracker { HitboxRadius = HitboxRadius }
+        };
+        trackers[0].Update(new Point2D(600, -200), gameTime: 0);
+        trackers[0].Update(new Point2D(600, -165), gameTime: 0.1);
+        trackers[1].Update(new Point2D(800, 0), gameTime: 0); // stationary
+
+        var results = new GagongPredictionEngine().PredictMultiple(NidaleeQ, Caster, trackers);
+
+        Assert.Equal(2, results.Count);
+        Assert.All(results, r => Assert.IsType<PredictionResult.Hit>(r));
+    }
+
+    [Fact]
+    public void ValidateHit_TargetInPath_ReturnsTrue()
+    {
+        var skillshot = new Skillshot.Linear(Delay: 0, Speed: 1000, Width: 100, Range: 1000);
+        var aimPos = new Point2D(1000, 0);
+        var targetPos = new Point2D(500, 0);
+
+        var result = new GagongPredictionEngine().ValidateHit(
+            skillshot, Caster, aimPos, targetPos, hitboxRadius: 50, timeElapsed: 0.6);
+
+        Assert.True(result);
+    }
+
+    [Fact]
+    public void ValidateHit_TargetOutsidePath_ReturnsFalse()
+    {
+        var skillshot = new Skillshot.Linear(Delay: 0, Speed: 1000, Width: 100, Range: 1000);
+        var aimPos = new Point2D(1000, 0);
+        var targetPos = new Point2D(500, 300); // Too far from line
+
+        var result = new GagongPredictionEngine().ValidateHit(
+            skillshot, Caster, aimPos, targetPos, hitboxRadius: 50, timeElapsed: 0.6);
+
+        Assert.False(result);
+    }
+
     /// <summary>
     /// Continuous minimum gap between missile front and target center in the
     /// simulation's frame (raw-delay launch).

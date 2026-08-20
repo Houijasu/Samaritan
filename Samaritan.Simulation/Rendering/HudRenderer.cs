@@ -105,6 +105,7 @@ public class HudRenderer
             PredictionMethod.Nearest => ("NEAREST (tangent)", Color.Cyan),
             PredictionMethod.Optimal => ("OPTIMAL (fast rear)", Color.Orange),
             PredictionMethod.Gagong => ("GAGONG (lua port)", Color.Violet),
+            PredictionMethod.Minima => ("MINIMA (fast+shallow)", Color.Pink),
             _ => ("AFTER (exact rear)", HitColor)
         };
         DrawText($"Method: {methodLabel}", 20, 128, methodColor, _font);

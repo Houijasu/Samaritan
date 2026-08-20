@@ -7,7 +7,8 @@ A skillshot prediction engine for League of Legends with real-time visualization
 - **Exact interception math** - Closed-form quadratic solves for moving targets, with no
   heuristic correction factors or numerical poles
 - **Selectable aim modes** - Rear-edge graze (dodge-resistant), tangent graze (minimal
-  penetration), or optimal (earliest rear-side contact with a penetration cap)
+  penetration), optimal (earliest rear-side contact with a penetration cap), or minima
+  (contact just under Gagong's, with the shallowest pass that fits under it)
 - **Multi-path interception** - Predicts interception points for targets following complex
   waypoint paths (zigzag, curves) via segment-by-segment path cutting
 - **Continuous collision** - Swept relative-motion hit detection; grazing contacts cannot
@@ -46,7 +47,7 @@ dotnet run --project Samaritan.Simulation
 | R | Reset current scenario |
 | Left / Right | Previous / next scenario |
 | + / - | Simulation speed (0.25x - 4x) |
-| **M** | Cycle prediction method: AFTER (exact rear) / NEAREST (tangent) / OPTIMAL (fast rear) / GAGONG (lua port) |
+| **M** | Cycle prediction method: AFTER (exact rear) / NEAREST (tangent) / OPTIMAL (fast rear) / GAGONG (lua port) / MINIMA (fast+shallow) |
 | Esc | Exit |
 | Mouse drag | Yellow handles move the caster / target start; the green handle sets the target's movement direction |
 
@@ -61,6 +62,7 @@ flight versus the effective radius, i.e. how far the shot is from the tangency b
 | `RearGraze` (default) | Exact-time rear contact | First contact at the exact (minimal) interception time, with the touch point swung toward the rear rim - rear-ness at zero time cost, using the flat region around the time minimum. Falls back to the rear-edge tangency graze. |
 | `NearestRear` | Most tangent hit | Searches the missile ray angle directly for a closest approach of `R*(1 - eps)` in the actual-cast frame - the simulated "HIT by x" margin is ~0.3 units at any geometry where a tangent graze is reachable. |
 | `Optimal` | Smallest interception time, still from behind | Among rays whose pass lands on the rear half of the hitbox and penetrates no deeper than the target's bounding radius, picks the earliest first contact and casts at the contact point itself. |
+| `Minima` | Beats Gagong's ACTUAL HIT, then shallowest pass | Runs the Gagong port internally as the reference: the contact lands earlier than Gagong's by a share of its own slack above the global floor (capped at 2 ms - ties the floor where Gagong is optimal), and among rays under that contact budget the pass with the largest closest approach is chosen, cast at the contact point itself. |
 
 All modes fall back gracefully (`OutOfRange` / `Unreachable` / rear-graze) when their
 constraint set is empty. Placed effects (circular, rectangle, vector) always center the
@@ -70,7 +72,8 @@ The simulation additionally offers **GAGONG**, a faithful port of a community Lu
 prediction routine, kept as a comparison reference; it is implemented on
 MathNet.Spatial/Numerics primitives with an allocation-free hot path (behavior pinned
 by golden-value tests). Benchmarks (Nidalee Q, per call, caching disabled):
-Gagong ~200 ns, NearestRear ~260 ns, RearGraze ~420 ns, Optimal ~2.8 us.
+Gagong ~200 ns, NearestRear ~260 ns, RearGraze ~420 ns, Optimal ~2.8 us, Minima ~6.0 us
+(Minima includes an internal Gagong reference solve).
 
 ## Algorithm
 

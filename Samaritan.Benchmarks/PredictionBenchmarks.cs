@@ -52,6 +52,10 @@ public class PredictionBenchmarks
         _engine.PredictFromState(NidaleeQ, Caster, _target, 65, ProjectileAimMode.Optimal);
 
     [Benchmark]
+    public PredictionResult Minima() =>
+        _engine.PredictFromState(NidaleeQ, Caster, _target, 65, ProjectileAimMode.Minima);
+
+    [Benchmark]
     public PredictionResult Gagong() =>
         _gagong.PredictFromState(NidaleeQ, Caster, _target, 65);
 }

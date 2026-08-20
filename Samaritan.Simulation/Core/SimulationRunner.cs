@@ -24,7 +24,10 @@ public enum PredictionMethod
     Optimal,
 
     /// <summary>Port of the community "Gagong" Lua prediction routine, for comparison.</summary>
-    Gagong
+    Gagong,
+
+    /// <summary>Lexicographic optimum: earliest first contact, then shallowest pass.</summary>
+    Minima
 }
 
 /// <summary>
@@ -33,7 +36,7 @@ public enum PredictionMethod
 public class SimulationRunner
 {
     private readonly PredictionEngine _engine = new();
-    private readonly GagongPredictionEngine _gagongEngine = new();
+    private readonly IPredictionEngine _gagongEngine = new GagongPredictionEngine();
     private readonly SimulationLogger _logger = new();
     private Scenario? _scenario;
 
@@ -46,8 +49,8 @@ public class SimulationRunner
 
     /// <summary>
     /// Cycles between the prediction algorithms
-    /// (After -> Nearest -> Optimal -> Gagong) and recomputes the prediction
-    /// for the loaded scenario.
+    /// (After -> Nearest -> Optimal -> Gagong -> Minima) and recomputes the
+    /// prediction for the loaded scenario.
     /// </summary>
     public void CycleMethod()
     {
@@ -56,6 +59,7 @@ public class SimulationRunner
             PredictionMethod.After => PredictionMethod.Nearest,
             PredictionMethod.Nearest => PredictionMethod.Optimal,
             PredictionMethod.Optimal => PredictionMethod.Gagong,
+            PredictionMethod.Gagong => PredictionMethod.Minima,
             _ => PredictionMethod.After
         };
         Reset();
@@ -147,6 +151,12 @@ public class SimulationRunner
                 _scenario.CasterPosition,
                 movementState,
                 _scenario.HitboxRadius),
+            PredictionMethod.Minima => _engine.PredictFromState(
+                _scenario.Skillshot,
+                _scenario.CasterPosition,
+                movementState,
+                _scenario.HitboxRadius,
+                ProjectileAimMode.Minima),
             _ => _engine.PredictFromState(
                 _scenario.Skillshot,
                 _scenario.CasterPosition,

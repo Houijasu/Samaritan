@@ -25,6 +25,15 @@ public sealed class PredictionEngine : IPredictionEngine
     private const double TangentGrazeEpsilon = 0.0025;
     private const double TangentGapToleranceUnits = 0.1;
 
+    // Minima: how much earlier than the Gagong reference contact Minima's own
+    // contact may land, in seconds - the CAP on the contact win. The actual
+    // margin is a small share of Gagong's own slack above the global contact
+    // floor, so where Gagong is near-optimal Minima ties it instead of paying
+    // depth for a sub-millisecond win (the contact-vs-depth frontier is steep
+    // near the floor)
+    private const double MinimaGagongContactMargin = 0.002;
+    private const double MinimaGagongSlackShare = 0.15;
+
     private PredictionConfig _config;
     private readonly IInterceptionSolver _solver;
     private readonly PredictionCache? _cache;
@@ -186,6 +195,14 @@ public sealed class PredictionEngine : IPredictionEngine
                             casterPosition, targetPosition, targetVelocity, effectiveRadius,
                             movingSolverSpeed, effectiveDelay, _config.NetworkCompensationDelay, range,
                             hitboxRadius)
+                        ?? SolveTrailingEdgeInterception(
+                            casterPosition, targetPosition, targetVelocity, effectiveRadius,
+                            movingSolverSpeed, effectiveDelay, RearGrazeMargin, 0),
+                    ProjectileAimMode.Minima =>
+                        SolveMinimaInterception(
+                            casterPosition, targetPosition, targetVelocity, effectiveRadius,
+                            movingSolverSpeed, effectiveDelay, _config.NetworkCompensationDelay, range,
+                            GagongCastPosition(skillshot, casterPosition, targetState, hitboxRadius))
                         ?? SolveTrailingEdgeInterception(
                             casterPosition, targetPosition, targetVelocity, effectiveRadius,
                             movingSolverSpeed, effectiveDelay, RearGrazeMargin, 0),
@@ -812,6 +829,210 @@ public sealed class PredictionEngine : IPredictionEngine
 
         return (time, castPosition);
     }
+
+    /// <summary>
+    /// Solves the Minima aim: the SHALLOWEST pass (minimal HIT BY) among rays
+    /// whose first contact beats the Gagong reference contact by
+    /// <see cref="MinimaGagongContactMargin"/> - so ACTUAL HIT lands earlier
+    /// than Gagong wherever Gagong is above the global contact floor, and the
+    /// depth sacrificed for the shallowness is the little the geometry forces.
+    /// Where Gagong already sits on the floor (chasing/fleeing geometries,
+    /// where its centered interception is optimal), the budget clamps to the
+    /// floor and Minima ties Gagong's contact. The gap grows toward the two
+    /// tangent endpoints of the hit arc as the contact time grows away from
+    /// the arc's deep center, so the optimum sits exactly on the budget
+    /// boundary - found by per-side bisection. Without a Gagong reference
+    /// (it missed or returned a non-hit), the budget collapses to the plain
+    /// earliest contact. Casts at the contact point itself. Returns null when
+    /// no in-range hitting ray exists (caller falls back to the rear-graze
+    /// solve).
+    /// </summary>
+    private static (double Time, Point2D AimPoint)? SolveMinimaInterception(
+        Point2D casterPosition,
+        Point2D targetPosition,
+        Vector2D targetVelocity,
+        double effectiveRadius,
+        double projectileSpeed,
+        double effectiveDelay,
+        double networkCompensation,
+        double range,
+        Point2D? gagongCastPosition)
+    {
+        var rawDelay = Math.Max(0, effectiveDelay - networkCompensation);
+        var launchOffset = (targetPosition - casterPosition) + targetVelocity.ScaleBy(rawDelay);
+        var maxFlight = range / projectileSpeed;
+
+        // Target's hitbox already covers the launch point - immediate hit
+        if (launchOffset.Length <= effectiveRadius)
+            return (effectiveDelay, targetPosition + targetVelocity.ScaleBy(effectiveDelay));
+
+        var targetGap = effectiveRadius * (1 - TangentGrazeEpsilon);
+
+        double GapAt(Vector2D ray) => ClampedRayMinGap(
+            launchOffset, targetVelocity - ray.ScaleBy(projectileSpeed), maxFlight);
+
+        if (FindDeepInnerRay(
+                launchOffset, targetPosition - casterPosition, targetVelocity,
+                projectileSpeed, rawDelay, targetGap, GapAt) is not Vector2D innerRay)
+        {
+            return null;
+        }
+
+        // Hit-arc endpoints: the near-tangent rays on both rotation sides
+        if (BisectTangentRay(innerRay, 1.0, targetGap, GapAt) is not Vector2D positiveEnd ||
+            BisectTangentRay(innerRay, -1.0, targetGap, GapAt) is not Vector2D negativeEnd)
+        {
+            return null;
+        }
+
+        var positiveAngle = SignedAngle(innerRay, positiveEnd);
+        var negativeAngle = SignedAngle(innerRay, negativeEnd);
+
+        double? FlightAt(Vector2D ray)
+        {
+            var relativeVelocity = targetVelocity - ray.ScaleBy(projectileSpeed);
+            var flight = MinRootAtOrAfter(
+                relativeVelocity.DotProduct(relativeVelocity),
+                2.0 * launchOffset.DotProduct(relativeVelocity),
+                launchOffset.DotProduct(launchOffset) - effectiveRadius * effectiveRadius,
+                0);
+
+            return flight is double f && f <= maxFlight ? f : null;
+        }
+
+        // Pass 1: the earliest first contact over the whole hit arc - the
+        // answer when the cap is free (narrow arcs), and the fallback when no
+        // in-range ray satisfies it. Refined locally around the coarse argmin.
+        Vector2D? earlyRay = null;
+        var minFlight = double.MaxValue;
+        var argminAngle = 0.0;
+
+        void SweepEarliest(double fromAngle, double toAngle, int steps)
+        {
+            for (var i = 0; i <= steps; i++)
+            {
+                var angle = fromAngle + (toAngle - fromAngle) * i / steps;
+                var ray = Rotate(innerRay, angle);
+                if (FlightAt(ray) is double flight && flight < minFlight)
+                {
+                    minFlight = flight;
+                    earlyRay = ray;
+                    argminAngle = angle;
+                }
+            }
+        }
+
+        SweepEarliest(negativeAngle, positiveAngle, 64);
+        if (earlyRay is null)
+            return null;
+
+        var coarseStep = (positiveAngle - negativeAngle) / 64;
+        SweepEarliest(argminAngle - coarseStep, argminAngle + coarseStep, 64);
+
+        // Pass 2: the budget - the latest first contact Minima may take. It is
+        // the Gagong reference contact minus a margin, clamped to the global
+        // floor from pass 1. The margin spends only a small share of Gagong's
+        // own slack above that floor on the contact win (capped): where
+        // Gagong already sits on the floor, the budget ties it; where Gagong
+        // is well above, Minima's contact lands earlier by up to the cap.
+        double? budget = null;
+        if (gagongCastPosition is Point2D gagongAim)
+        {
+            var toGagongAim = gagongAim - casterPosition;
+            if (toGagongAim.Length > 1e-9
+                && FlightAt(toGagongAim.Normalize()) is double gagongFlight)
+            {
+                var slack = Math.Max(0, gagongFlight - minFlight);
+                var margin = Math.Min(MinimaGagongContactMargin, MinimaGagongSlackShare * slack);
+                budget = Math.Max(gagongFlight - margin, minFlight);
+            }
+        }
+
+        // The shallowest pass among rays whose contact fits the budget: gap
+        // grows toward the tangent endpoints while flight grows away from the
+        // argmin, so the optimum sits exactly ON the budget boundary on each
+        // side - bisected below. A coarse arc sweep plus the argmin ray guard
+        // against non-monotone geometries. Without a Gagong reference (it
+        // missed), the budget collapses to the earliest contact itself.
+        var threshold = budget ?? minFlight;
+
+        Vector2D? bestRay = null;
+        var bestGap = double.MinValue;
+        var bestFlight = 0.0;
+
+        void Consider(Vector2D ray)
+        {
+            if (FlightAt(ray) is not double flight || flight > threshold)
+                return;
+
+            var gap = GapAt(ray);
+            if (gap > bestGap)
+            {
+                bestGap = gap;
+                bestFlight = flight;
+                bestRay = ray;
+            }
+        }
+
+        Consider(earlyRay.Value);
+        for (var i = 0; i <= 64; i++)
+            Consider(Rotate(innerRay, negativeAngle + (positiveAngle - negativeAngle) * i / 64));
+
+        if (budget is double bounded)
+        {
+            // Boundary bisection per side: the flight grows from the argmin
+            // toward the tangent endpoint, so the budget boundary is crossed
+            // once per side; lo stays on the within-budget side
+            for (var side = 0; side < 2; side++)
+            {
+                var endAngle = side == 0 ? positiveAngle : negativeAngle;
+
+                // Feasible all the way to the tangent endpoint - it IS the boundary
+                if (FlightAt(Rotate(innerRay, endAngle)) is double endFlight && endFlight <= bounded)
+                {
+                    Consider(Rotate(innerRay, endAngle));
+                    continue;
+                }
+
+                var lo = argminAngle;
+                var hi = endAngle;
+                for (var i = 0; i < 50; i++)
+                {
+                    var mid = (lo + hi) / 2;
+                    if (FlightAt(Rotate(innerRay, mid)) is double midFlight && midFlight <= bounded)
+                        lo = mid;
+                    else
+                        hi = mid;
+                }
+
+                Consider(Rotate(innerRay, lo));
+            }
+        }
+
+        var finalRay = bestRay ?? earlyRay.Value;
+        var finalFlight = FlightAt(finalRay) ?? minFlight;
+        var castPosition = casterPosition + finalRay.ScaleBy(Math.Max(1.0, projectileSpeed * finalFlight));
+        var time = PredictionFrameContactTime(
+            casterPosition, targetPosition, targetVelocity, effectiveRadius,
+            projectileSpeed, effectiveDelay, finalRay, maxFlight);
+
+        return (time, castPosition);
+    }
+
+    /// <summary>
+    /// Cast position the Gagong port would choose for this state, or null when
+    /// it does not produce a hit. Minima uses its contact time as the budget
+    /// to beat. The engine is constructed per call with the live config so
+    /// ping updates stay reflected.
+    /// </summary>
+    private Point2D? GagongCastPosition(
+        Skillshot skillshot,
+        Point2D casterPosition,
+        MovementState targetState,
+        double hitboxRadius) =>
+        new GagongPredictionEngine(_config)
+            .PredictFromState(skillshot, casterPosition, targetState, hitboxRadius)
+            is PredictionResult.Hit hit ? hit.CastPosition : null;
 
     /// <summary>
     /// Finds a ray with a deep closest approach (below targetGap) to bracket the

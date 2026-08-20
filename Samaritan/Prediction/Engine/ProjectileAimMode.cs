@@ -37,5 +37,20 @@ public enum ProjectileAimMode
     /// cast position to the target). Falls back to <see cref="RearGraze"/> when
     /// no such ray exists.
     /// </summary>
-    Optimal
+    Optimal,
+
+    /// <summary>
+    /// Beats the Gagong reference on ACTUAL HIT, then gets the shallowest pass
+    /// it can with the time left over: the first contact lands just (2 ms)
+    /// earlier than the contact the Gagong port itself would achieve on the
+    /// same state - running the port internally as the reference - and among
+    /// rays within that budget, the pass with the largest closest approach
+    /// (minimal HIT BY) is chosen, cast at the contact point itself. Where
+    /// Gagong already sits on the global contact floor (chasing/fleeing
+    /// geometries, where its centered interception is optimal), the budget
+    /// clamps to the floor and Minima ties Gagong's contact without going
+    /// deeper. Falls back to <see cref="RearGraze"/> when no in-range hitting
+    /// ray exists.
+    /// </summary>
+    Minima
 }
